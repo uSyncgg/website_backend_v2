@@ -4,7 +4,6 @@ from app.models.base import Base
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy import ForeignKey, String
 from sqlalchemy.dialects.postgresql import ARRAY
-from typing import Optional
 
 class FormParent(Base):
     __tablename__ = "form_parent"

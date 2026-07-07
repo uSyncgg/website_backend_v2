@@ -1,6 +1,16 @@
+import os
+
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from app.core.db import engine
+from app.core.middleware import add_process_time
 from contextlib import asynccontextmanager
+from stripe import StripeClient
+from dotenv import load_dotenv
+
+from app.routers import tournaments
+
+load_dotenv()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -11,9 +21,26 @@ async def lifespan(app: FastAPI):
     ::param app the FastAPI application.
     """
 
+    # app.state.stripe = StripeClient(os.getenv("STRIPE_TEST_KEY"))
+
     yield
 
     await engine.dispose()
 
 app = FastAPI(lifespan=lifespan)
 
+app.middleware("http")(add_process_time)
+
+app.add_middleware(
+    CORSMiddleware, 
+    allow_origins = [
+        "http://localhost:3000",
+        "https://www.usync.gg",
+        "https://usync.gg"
+    ],
+    allow_credentials = True,
+    allow_methods = ["*"],
+    allow_headers = ["*"]    
+)
+
+app.include_router(tournaments.router)

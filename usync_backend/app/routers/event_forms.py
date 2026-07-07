@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.core.deps import get_db
+from app.core.dependencies import get_db
 from app.schemas.event_forms import FormReviewIn, FormReviewOut, FormSubmissionIn, FormSubmissionOut
 
 router = APIRouter(prefix="/eventForm", tags=["Event Form"])
