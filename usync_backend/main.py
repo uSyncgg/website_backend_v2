@@ -9,6 +9,7 @@ from stripe import StripeClient
 from dotenv import load_dotenv
 
 from app.routers import tournaments
+from app.routers import healthcheck
 
 load_dotenv()
 
@@ -44,3 +45,4 @@ app.add_middleware(
 )
 
 app.include_router(tournaments.router)
+app.include_router(healthcheck.router)
