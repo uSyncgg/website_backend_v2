@@ -4,7 +4,6 @@ from app.models.base import Base
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy import ForeignKey, DateTime, text
 from datetime import datetime
-from sqlalchemy.dialects.postgresql import ARRAY
 
 class TournamentParent(Base):
     __tablename__ = "tournaments_parent"
