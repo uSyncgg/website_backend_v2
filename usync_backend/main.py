@@ -34,15 +34,15 @@ app = FastAPI(lifespan=lifespan)
 app.middleware("http")(add_process_time)
 
 app.add_middleware(
-    CORSMiddleware, 
+    CORSMiddleware,
     allow_origins = [
-        "http://localhost:3000",
         "https://www.usync.gg",
         "https://usync.gg"
     ],
+    allow_origin_regex = r"http://(localhost|127\.0\.0\.1)(:\d+)?",
     allow_credentials = True,
     allow_methods = ["*"],
-    allow_headers = ["*"]    
+    allow_headers = ["*"]
 )
 
 app.include_router(tournaments.router)
