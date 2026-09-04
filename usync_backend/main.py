@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 
 from app.routers import tournaments
 from app.routers import healthcheck
+from app.routers import events
 
 load_dotenv()
 
@@ -46,3 +47,4 @@ app.add_middleware(
 
 app.include_router(tournaments.router)
 app.include_router(healthcheck.router)
+app.include_router(events.router)
