@@ -19,6 +19,8 @@ class LeaguesOut(BaseModel):
     verified: bool
     path: str
     group: str | None
+    is_hs: bool
+    is_college: bool
 
 class LeagueParentsOut(BaseModel):
     """
@@ -28,10 +30,13 @@ class LeagueParentsOut(BaseModel):
 
     name: str
     banner_img: str
+    header_img: str
     verified: bool
     path: str
     game: str
     leagues: list[LeaguesOut]
+    is_hs: bool
+    is_college: bool
 
 class LansOut(BaseModel):
     """
@@ -49,6 +54,8 @@ class LansOut(BaseModel):
     verified: bool
     archived: bool
     path: str
+    lat: float
+    long: float
 
 class WagersOut(BaseModel):
     """

@@ -30,6 +30,8 @@ class LanEvents(Base):
     game: Mapped[str] = mapped_column()
     drop_val: Mapped[bool] = mapped_column(server_default = text("true"))
     path: Mapped[str] = mapped_column()
+    lat: Mapped[float] = mapped_column(default = 0.0, server_default = text("0.0"))
+    long: Mapped[float] = mapped_column(default = 0.0, server_default = text("0.0"))
 
 class LeagueParentEvents(Base):
     __tablename__ = "league_parent_events"
@@ -37,10 +39,13 @@ class LeagueParentEvents(Base):
     id: Mapped[uuid.UUID] = mapped_column(ForeignKey("events.id"), primary_key = True, unique = True, default = uuid.uuid4)
     name: Mapped[str] = mapped_column(unique=True)
     banner_img: Mapped[str] = mapped_column(default = "pending")
+    header_img: Mapped[str] = mapped_column(default = "pending", server_default = text("'pending'"))
     status: Mapped[str] = mapped_column(default = "pending")
     verified: Mapped[bool] = mapped_column(default = False)
     game: Mapped[str] = mapped_column()
     path: Mapped[str] = mapped_column()
+    is_hs: Mapped[bool] = mapped_column(default = False, server_default = text("false"))
+    is_college: Mapped[bool] = mapped_column(default = False, server_default = text("false"))
     drop_val: Mapped[bool] = mapped_column(server_default = text("true"))
 
 class LeagueEvents(Base):
@@ -62,6 +67,8 @@ class LeagueEvents(Base):
     drop_val: Mapped[bool] = mapped_column(server_default = text("true"))
     path: Mapped[str] = mapped_column()
     group: Mapped[str | None] = mapped_column(ForeignKey("league_parent_events.name"), default = None)
+    is_hs: Mapped[bool] = mapped_column(default = False, server_default = text("false"))
+    is_college: Mapped[bool] = mapped_column(default = False, server_default = text("false"))
 
 class XpEvents(Base):
     __tablename__ = "xp_events"

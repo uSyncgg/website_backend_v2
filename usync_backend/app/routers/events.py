@@ -3,26 +3,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.dependencies import get_db
 from app.schemas.event_forms import FormReviewIn, FormReviewOut, FormSubmissionIn, FormSubmissionOut
 from app.schemas.events import LeaguesOut, LansOut, WagersOut, XpsOut, LeagueParentsOut
-from app.services.events import get_lans, get_leagues, get_wagers, get_xps, get_league_parents, league_nesting, get_event
+from app.services.events import get_lans, get_leagues, get_wagers, get_xps, get_league_parents, league_nesting, get_event, get_league_children
 
 router = APIRouter(prefix="/events", tags=["Events"])
 
 EventModel = LeaguesOut | LansOut | WagersOut | XpsOut
 
-@router.get("/{event_type}/{game}/{event}", response_model = EventModel)
-async def event_information(event_type: str, game: str, event: str, db: AsyncSession = Depends(get_db)):
+@router.get("/leagues/{game}/{parent}/children", response_model=list[LeaguesOut])
+async def league_children(game: str, parent: str, db: AsyncSession = Depends(get_db)):
     """
-    Calls functionality to return event information for a specific event specified by the user.
+    Calls functionality to return the league children within a parent.
 
-    ::param event_type the string denoting leagues, lans, wagers, head-to-head
-    ::param game the game string
-    ::param event the string denoting the event name
+    ::param game the game the user is looking at
+    ::param parent the parent league that owns the children
     ::param db the asynchronous db session
 
-    ::return the response model containing event information
+    ::return a list of the League response model
     """
 
-    return await get_event(event_type, game, event, db)
+    return await get_league_children(game, parent, db)
 
 @router.get("/leagues/{game}", response_model=list[LeaguesOut | LeagueParentsOut])
 async def leagues(game: str, db: AsyncSession = Depends(get_db)):
@@ -78,6 +77,21 @@ async def xps(game: str, db: AsyncSession = Depends(get_db)):
     """
 
     return await get_xps(game, db)
+
+@router.get("/{event_type}/{game}/{event}", response_model = EventModel)
+async def event_information(event_type: str, game: str, event: str, db: AsyncSession = Depends(get_db)):
+    """
+    Calls functionality to return event information for a specific event specified by the user.
+
+    ::param event_type the string denoting leagues, lans, wagers, head-to-head
+    ::param game the game string
+    ::param event the string denoting the event name
+    ::param db the asynchronous db session
+
+    ::return the response model containing event information
+    """
+
+    return await get_event(event_type, game, event, db)
 
 @router.post("/form/review", response_model=FormReviewOut)
 def review_form_data(payload: FormReviewIn, db: AsyncSession = Depends(get_db)):

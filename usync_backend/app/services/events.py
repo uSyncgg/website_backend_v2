@@ -42,10 +42,13 @@ def league_nesting(leagues: Sequence[LeagueEvents], league_parents: Sequence[Lea
         LeagueParentsOut(
             name = parent.name,
             banner_img = parent.banner_img,
+            header_img = parent.header_img,
             verified = parent.verified,
             path = parent.path,
             game = parent.game,
-            leagues = grouped[parent.name]
+            leagues = grouped[parent.name],
+            is_hs = parent.is_hs,
+            is_college = parent.is_college
         )
         for parent in league_parents
         if parent.name in grouped
@@ -72,7 +75,12 @@ async def get_event(event_type: str, game: str, event_name: str, db: AsyncSessio
     )
 
     result = await db.execute(stmt)
-    return result.scalars().first()
+    event = result.scalars().first()
+
+    if event is None:
+        raise HTTPException(status_code=404, detail=f"Event not found: {event_name}")
+
+    return event
 
 async def get_league_parents(game: str, db: AsyncSession) -> Sequence[LeagueParentEvents]:
     """
@@ -87,6 +95,24 @@ async def get_league_parents(game: str, db: AsyncSession) -> Sequence[LeaguePare
     
     result = await db.execute(stmt)
     return result.scalars().all()
+
+async def get_league_children(game: str, parent: str, db: AsyncSession) -> Sequence[LeagueEvents]:
+    """
+    
+    """
+
+    stmt = (
+        select(LeagueEvents)
+        .where(LeagueEvents.status != "pending", LeagueEvents.game == game, LeagueEvents.group == parent)
+    )
+
+    result = await db.execute(stmt)
+    events = result.scalars().all()
+
+    if len(events) == 0:
+        raise HTTPException(status_code=404, detail=f"Parent does not exist: {parent}")
+
+    return events
 
 async def get_leagues(game: str, db: AsyncSession) -> Sequence[LeagueEvents]:
     """
