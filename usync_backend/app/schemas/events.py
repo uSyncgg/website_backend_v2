@@ -34,7 +34,7 @@ class LeagueParentsOut(BaseModel):
     verified: bool
     path: str
     game: str
-    leagues: list[LeaguesOut]
+    leagues: list[LeaguesOut] = []
     is_hs: bool
     is_college: bool
 
@@ -42,6 +42,7 @@ class LansOut(BaseModel):
     """
     Validation class for the response payload information related to the /events/lans endpoint.
     """
+    model_config = ConfigDict(from_attributes=True)
 
     name: str
     date: str
@@ -61,6 +62,7 @@ class WagersOut(BaseModel):
     """
     Validation class for the response payload information related to the /events/wagers endpoint.
     """
+    model_config = ConfigDict(from_attributes=True)
 
     name: str
     fee_details: list[str]
@@ -77,9 +79,11 @@ class XpsOut(BaseModel):
     """
     Validation class for the response payload information related to the /events/h2h endpoint.
     """
+    model_config = ConfigDict(from_attributes=True)
 
     name: str
     details: list[str]
+    fee_details: list[str]
     restrictions: dict[str, str | list[str]]
     availability: list[str]
     url: str

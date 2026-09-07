@@ -1,9 +1,24 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.core.dependencies import get_db
+from app.core.dependencies import get_db, get_verified_cache, verify_sitemap_token
 from app.schemas.event_forms import FormReviewIn, FormReviewOut, FormSubmissionIn, FormSubmissionOut
 from app.schemas.events import LeaguesOut, LansOut, WagersOut, XpsOut, LeagueParentsOut
-from app.services.events import get_lans, get_leagues, get_wagers, get_xps, get_league_parents, league_nesting, get_event, get_league_children
+from cachetools import TTLCache
+from app.services.events import (
+    get_lans, 
+    get_leagues, 
+    get_wagers, 
+    get_xps, 
+    get_league_parents, 
+    league_nesting, 
+    get_event, 
+    get_league_children, 
+    get_event_by_path,
+    get_lan_information,
+    get_league_information,
+    get_verified_events,
+    invalidate_verified_events_cache
+)
 
 router = APIRouter(prefix="/events", tags=["Events"])
 
@@ -22,6 +37,20 @@ async def league_children(game: str, parent: str, db: AsyncSession = Depends(get
     """
 
     return await get_league_children(game, parent, db)
+
+@router.get("/leagues/{game}/{path:path}/information", response_model = LeagueParentsOut | LeaguesOut)
+async def league_information(path: str, game: str, db: AsyncSession = Depends(get_db)):
+    """
+    
+    """
+
+    parent = await get_league_information(path, game, db)
+
+    if parent:
+        events = await get_league_children(game, parent.name, db)
+        return league_nesting(events, [parent])[0]
+
+    return await get_league_information(path, game, db, parent = False)    
 
 @router.get("/leagues/{game}", response_model=list[LeaguesOut | LeagueParentsOut])
 async def leagues(game: str, db: AsyncSession = Depends(get_db)):
@@ -78,6 +107,22 @@ async def xps(game: str, db: AsyncSession = Depends(get_db)):
 
     return await get_xps(game, db)
 
+@router.get("/lans/{path}/information", response_model=EventModel)
+async def lan_information(path: str, db: AsyncSession = Depends(get_db)):
+    """
+    
+    """
+
+    return await get_lan_information(path, db)
+
+@router.get("/{event_type}/{game}/{path}", response_model = EventModel)
+async def event_information_by_path(event_type: str, game: str, path: str, db: AsyncSession = Depends(get_db)):
+    """
+    
+    """
+
+    return await get_event_by_path(event_type, game, path, db)
+
 @router.get("/{event_type}/{game}/{event}", response_model = EventModel)
 async def event_information(event_type: str, game: str, event: str, db: AsyncSession = Depends(get_db)):
     """
@@ -92,6 +137,21 @@ async def event_information(event_type: str, game: str, event: str, db: AsyncSes
     """
 
     return await get_event(event_type, game, event, db)
+
+@router.get("/{game}/verified", response_model=dict[str, list[LeaguesOut | LeagueParentsOut | WagersOut | XpsOut | LansOut]])
+async def verified_events(game: str, db: AsyncSession = Depends(get_db), cache: TTLCache = Depends(get_verified_cache)):
+    """
+    
+    """
+
+    return await get_verified_events(game, db, cache)
+
+@router.post("/{game}/verified/invalidate")
+async def invalidate_verified_events(game: str, cache: TTLCache = Depends(get_verified_cache), _: None = Depends(verify_sitemap_token)):
+    await invalidate_verified_events_cache(cache, game)
+
+    return {"status": "invalidated"}
+
 
 @router.post("/form/review", response_model=FormReviewOut)
 def review_form_data(payload: FormReviewIn, db: AsyncSession = Depends(get_db)):

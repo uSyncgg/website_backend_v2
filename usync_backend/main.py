@@ -2,15 +2,21 @@ import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.core.db import engine
+from app.core.db import engine, AsyncSessionLocal
 from app.core.middleware import add_process_time
 from contextlib import asynccontextmanager
 from stripe import StripeClient
 from dotenv import load_dotenv
+from cachetools import TTLCache
 
 from app.routers import tournaments
 from app.routers import healthcheck
 from app.routers import events
+from app.routers import sitemap
+
+from app.services import GAMES
+from app.services.sitemap import get_sitemap_xml
+from app.services.events import populate_verified_events_cache
 
 load_dotenv()
 
@@ -24,6 +30,11 @@ async def lifespan(app: FastAPI):
     """
 
     # app.state.stripe = StripeClient(os.getenv("STRIPE_TEST_KEY"))
+    app.state.sitemap_cache = TTLCache(maxsize=1, ttl=3600)
+    app.state.verified_cache = TTLCache(maxsize=len(GAMES), ttl=3600)
+    async with AsyncSessionLocal() as db:
+        await get_sitemap_xml(db, app.state.sitemap_cache)
+        await populate_verified_events_cache(db, app.state.verified_cache)
 
     yield
 
@@ -48,3 +59,4 @@ app.add_middleware(
 app.include_router(tournaments.router)
 app.include_router(healthcheck.router)
 app.include_router(events.router)
+app.include_router(sitemap.router)
