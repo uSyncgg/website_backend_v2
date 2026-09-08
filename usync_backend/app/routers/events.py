@@ -17,7 +17,8 @@ from app.services.events import (
     get_lan_information,
     get_league_information,
     get_verified_events,
-    invalidate_verified_events_cache
+    invalidate_verified_events_cache,
+    get_all_lans
 )
 
 router = APIRouter(prefix="/events", tags=["Events"])
@@ -80,6 +81,18 @@ async def lans(game: str, db: AsyncSession = Depends(get_db)):
     """
 
     return await get_lans(game, db)
+
+@router.get("/all_lans", response_model=list[LansOut])
+async def lans(db: AsyncSession = Depends(get_db)):
+    """
+    Calls functionality to return all non-archived lans.
+
+    ::param db the asynchronous db session
+
+    ::return the reponse model containing all non-archived lans
+    """
+
+    return await get_all_lans(db)
 
 @router.get("/wagers/{game}", response_model=list[WagersOut])
 async def wagers(game: str, db: AsyncSession = Depends(get_db)):

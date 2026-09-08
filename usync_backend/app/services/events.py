@@ -220,6 +220,20 @@ async def get_lans(game: str, db: AsyncSession) -> Sequence[LanEvents]:
     result = await db.execute(stmt)
     return result.scalars().all()
 
+async def get_all_lans(db: AsyncSession) -> Sequence[LanEvents]:
+    """
+    
+    """
+
+    stmt = (
+        select(LanEvents)
+        .where(LanEvents.status != "pending", LanEvents.archived.is_(False))
+        .order_by(LanEvents.verified.desc())
+    )
+
+    result = await db.execute(stmt)
+    return result.scalars().all()
+
 async def get_wagers(game: str, db: AsyncSession) -> Sequence[WagerEvents]:
     """
     

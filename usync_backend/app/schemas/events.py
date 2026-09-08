@@ -57,6 +57,7 @@ class LansOut(BaseModel):
     path: str
     lat: float
     long: float
+    game: str
 
 class WagersOut(BaseModel):
     """
