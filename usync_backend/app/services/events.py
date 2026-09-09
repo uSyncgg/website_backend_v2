@@ -58,7 +58,9 @@ def league_nesting(leagues: Sequence[LeagueEvents], league_parents: Sequence[Lea
             game = parent.game,
             leagues = grouped[parent.name],
             is_hs = parent.is_hs,
-            is_college = parent.is_college
+            is_college = parent.is_college,
+            seo_title = parent.seo_title,
+            seo_description = parent.seo_description
         )
         for parent in league_parents
         if parent.name in grouped
