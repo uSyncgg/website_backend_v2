@@ -21,6 +21,8 @@ class LeaguesOut(BaseModel):
     group: str | None
     is_hs: bool
     is_college: bool
+    seo_title: str | None
+    seo_description: str | None
 
 class LeagueParentsOut(BaseModel):
     """
@@ -37,6 +39,8 @@ class LeagueParentsOut(BaseModel):
     leagues: list[LeaguesOut] = []
     is_hs: bool
     is_college: bool
+    seo_title: str | None
+    seo_description: str | None
 
 class LansOut(BaseModel):
     """
@@ -58,6 +62,8 @@ class LansOut(BaseModel):
     lat: float
     long: float
     game: str
+    seo_title: str | None
+    seo_description: str | None
 
 class WagersOut(BaseModel):
     """
@@ -75,6 +81,8 @@ class WagersOut(BaseModel):
     banner_img: str
     verified: bool
     path: str
+    seo_title: str | None
+    seo_description: str | None
 
 class XpsOut(BaseModel):
     """
@@ -92,3 +100,5 @@ class XpsOut(BaseModel):
     banner_img: str
     verified: bool
     path: str
+    seo_title: str | None
+    seo_description: str | None
