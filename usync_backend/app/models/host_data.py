@@ -34,6 +34,8 @@ class LanEvents(Base):
     lat: Mapped[float] = mapped_column(default = 0.0, server_default = text("0.0"))
     long: Mapped[float] = mapped_column(default = 0.0, server_default = text("0.0"))
     updated_at: Mapped[datetime] = mapped_column(server_default = func.now(), onupdate = func.now())
+    seo_title: Mapped[str | None] = mapped_column()
+    seo_description: Mapped[str | None] = mapped_column()
 
 class LeagueParentEvents(Base):
     __tablename__ = "league_parent_events"
@@ -53,6 +55,8 @@ class LeagueParentEvents(Base):
     is_college: Mapped[bool] = mapped_column(default = False, server_default = text("false"))
     drop_val: Mapped[bool] = mapped_column(server_default = text("true"))
     updated_at: Mapped[datetime] = mapped_column(server_default = func.now(), onupdate = func.now())
+    seo_title: Mapped[str | None] = mapped_column()
+    seo_description: Mapped[str | None] = mapped_column()
 
 class LeagueEvents(Base):
     __tablename__ = "league_events"
@@ -79,6 +83,8 @@ class LeagueEvents(Base):
     is_hs: Mapped[bool] = mapped_column(default = False, server_default = text("false"))
     is_college: Mapped[bool] = mapped_column(default = False, server_default = text("false"))
     updated_at: Mapped[datetime] = mapped_column(server_default = func.now(), onupdate = func.now())
+    seo_title: Mapped[str | None] = mapped_column()
+    seo_description: Mapped[str | None] = mapped_column()
 
 class XpEvents(Base):
     __tablename__ = "xp_events"
@@ -101,6 +107,8 @@ class XpEvents(Base):
     drop_val: Mapped[bool] = mapped_column(server_default = text("true"))
     path: Mapped[str] = mapped_column()
     updated_at: Mapped[datetime] = mapped_column(server_default = func.now(), onupdate = func.now())
+    seo_title: Mapped[str | None] = mapped_column()
+    seo_description: Mapped[str | None] = mapped_column()
 
 class WagerEvents(Base):
     __tablename__ = "wager_events"
@@ -123,3 +131,5 @@ class WagerEvents(Base):
     drop_val: Mapped[bool] = mapped_column(server_default = text("true"))
     path: Mapped[str] = mapped_column()
     updated_at: Mapped[datetime] = mapped_column(server_default = func.now(), onupdate = func.now())
+    seo_title: Mapped[str | None] = mapped_column()
+    seo_description: Mapped[str | None] = mapped_column()
