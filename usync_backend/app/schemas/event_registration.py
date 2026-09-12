@@ -11,7 +11,7 @@ class EventPassesOut(BaseModel):
     tier_name: str
     price_cents: int
     is_active: bool
-    capacity: int
+    capacity: int | None
     sold_count: int
     requires_team: bool
     form_fields: list[dict]
