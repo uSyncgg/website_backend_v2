@@ -17,7 +17,7 @@ from app.routers import sitemap
 from app.routers import event_registration
 from app.routers import webhooks
 
-from app.services import GAMES
+from app.services import GAMES, STRIPE_SECRET_KEY
 from app.services.sitemap import get_sitemap_xml
 from app.services.events import populate_verified_events_cache
 
@@ -37,7 +37,7 @@ async def lifespan(app: FastAPI):
     ::param app the FastAPI application.
     """
 
-    app.state.stripe = StripeClient(os.getenv("STRIPE_TEST_KEY"))
+    app.state.stripe = StripeClient(STRIPE_SECRET_KEY)
     app.state.sitemap_cache = TTLCache(maxsize=1, ttl=3600)
     app.state.verified_cache = TTLCache(maxsize=len(GAMES), ttl=3600)
     async with AsyncSessionLocal() as db:

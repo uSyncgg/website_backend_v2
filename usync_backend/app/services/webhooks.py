@@ -8,12 +8,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
 from app.models.event_registration import EventRegistrations
 from app.services.event_registration import check_and_send
+from app.services import STRIPE_WEBHOOK_SECRET
 
 logger = logging.getLogger(__name__)
 
 async def handle_stripe_webhook(payload: bytes, signature: str, db: AsyncSession) -> dict:
     try:
-        event = stripe.Webhook.construct_event(payload, signature, os.getenv("STRIPE_TEST_WEBHOOK_KEY"))
+        event = stripe.Webhook.construct_event(payload, signature, STRIPE_WEBHOOK_SECRET)
     except stripe.error.SignatureVerificationError:
         raise HTTPException(status_code=400, detail="Invalid signature")
 
