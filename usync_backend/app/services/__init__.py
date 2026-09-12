@@ -10,3 +10,6 @@ GAMES = [
     "Rocket League",
     "Warzone"
 ]
+
+PLATFORM_FEE_PERCENT = 5
+REGISTRATION_STATUSES = ["pending", "paid", "payment_failed", "canceled"]

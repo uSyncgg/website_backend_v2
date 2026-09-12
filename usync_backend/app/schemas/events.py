@@ -64,6 +64,7 @@ class LansOut(BaseModel):
     game: str
     seo_title: str | None
     seo_description: str | None
+    usync_pass: bool
 
 class WagersOut(BaseModel):
     """

@@ -36,6 +36,7 @@ class LanEvents(Base):
     updated_at: Mapped[datetime] = mapped_column(server_default = func.now(), onupdate = func.now())
     seo_title: Mapped[str | None] = mapped_column()
     seo_description: Mapped[str | None] = mapped_column()
+    usync_pass: Mapped[bool] = mapped_column(default = False, server_default = text("false"))
 
 class LeagueParentEvents(Base):
     __tablename__ = "league_parent_events"

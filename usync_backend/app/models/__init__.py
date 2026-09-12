@@ -14,3 +14,4 @@ from app.models.users import (
     TournamentStatistics
 )
 from app.models.host_data import EventFormParent, LanEvents, LeagueEvents, XpEvents, WagerEvents
+from app.models.event_registration import EventPassTiers, EventRegistrations
