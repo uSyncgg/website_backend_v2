@@ -52,7 +52,7 @@ class EventRegistrations(Base):
     total_snapshot_cents: Mapped[int] = mapped_column()   
     stripe_payment_intent_id: Mapped[str | None] = mapped_column(unique=True, nullable=True, default=None)
     payment_status: Mapped[str] = mapped_column(default="pending", server_default=text("'pending'"))  
-    paid_at: Mapped[datetime | None] = mapped_column(nullable=True, default=None)
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone = True), nullable=True, default=None)
     receipt_email_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone = True), nullable=True, default=None)
     custom_fields: Mapped[dict] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())

@@ -196,9 +196,7 @@ async def check_and_send(registration: EventRegistrations, db: AsyncSession) -> 
     
     """
 
-    # if registration.payment_status != "paid" or registration.receipt_email_sent_at is not None:
-    #     return None
-    if registration.receipt_email_sent_at is not None:
+    if registration.payment_status != "paid" or registration.receipt_email_sent_at is not None:
         return None
 
     stmt = select(LanEvents.name).where(LanEvents.event_id == registration.event_id)
@@ -209,7 +207,8 @@ async def check_and_send(registration: EventRegistrations, db: AsyncSession) -> 
         to = registration.contact_email,
         display_name = registration.contact_username or "there",
         total_snapshot_cents = registration.total_snapshot_cents,
-        event_name = name
+        event_name = name,
+        id = registration.id
     )
 
     registration.receipt_email_sent_at = datetime.now(timezone.utc)

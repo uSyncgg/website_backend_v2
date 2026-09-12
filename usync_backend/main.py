@@ -15,6 +15,7 @@ from app.routers import healthcheck
 from app.routers import events
 from app.routers import sitemap
 from app.routers import event_registration
+from app.routers import webhooks
 
 from app.services import GAMES
 from app.services.sitemap import get_sitemap_xml
@@ -68,3 +69,4 @@ app.include_router(healthcheck.router)
 app.include_router(events.router)
 app.include_router(sitemap.router)
 app.include_router(event_registration.router)
+app.include_router(webhooks.router)
