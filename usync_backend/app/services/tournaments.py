@@ -12,7 +12,12 @@ GAME_MODELS = {
 
 async def get_tournaments(game: str, db: AsyncSession) -> Sequence[CodTournament]:
     """
-    
+    Asynchronous function to get all tournaments related to a specific game.
+
+    ::param game the string containing the game
+    ::param db the Asynchronous database Session
+
+    ::return a sequence containing all tournaments fetched and validated by the appropriate schema
     """
 
     model = GAME_MODELS.get(game)

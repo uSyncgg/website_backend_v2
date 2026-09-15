@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 class EventPassesOut(BaseModel):
     """
-    
+    Validation class for EventPasses being sent to the frontend.
     """
 
     id: uuid.UUID
@@ -20,7 +20,7 @@ class EventPassesOut(BaseModel):
 
 class EventSubmissionIn(BaseModel):
     """
-    
+    Validation class for the EventSubmission payload from the frontend.
     """
 
     pass_tier_id: uuid.UUID
@@ -33,7 +33,7 @@ class EventSubmissionIn(BaseModel):
 
 class EventSubmissionOut(BaseModel):
     """
-    
+    Validation class for the EventSubmission information being sent to the frontend.
     """
 
     registration_id: uuid.UUID
@@ -42,7 +42,7 @@ class EventSubmissionOut(BaseModel):
 
 class PaymentIntentOut(BaseModel):
     """
-    
+    Validation class for the PaymentIntent information being sent to the frontend.
     """
 
     client_secret: str
@@ -50,7 +50,7 @@ class PaymentIntentOut(BaseModel):
 
 class ReceiptOut(BaseModel):
     """
-    
+    Validation class for the Receipt being sent to the frontend.
     """
 
     payment_status: str

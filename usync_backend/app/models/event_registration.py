@@ -8,7 +8,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 
 class EventPassTiers(Base):
     """
-    
+    SQL Alechemy model describing the event_pass_tiers table.
     """
 
     __tablename__ = "event_pass_tiers"
@@ -18,6 +18,8 @@ class EventPassTiers(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("events.id"))
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), default=None)
+    host_email: Mapped[str | None] = mapped_column(nullable = True, default = "contact@usync.gg", server_default = text("'contact@usync.gg'"))
     tier_name: Mapped[str] = mapped_column()          
     price_cents: Mapped[int] = mapped_column()
     capacity: Mapped[int | None] = mapped_column(nullable=True, default=None)
@@ -32,7 +34,7 @@ class EventPassTiers(Base):
 
 class EventRegistrations(Base):
     """
-    
+    SQL Alchemy model describing the event_registrations table.
     """
 
     __tablename__ = "event_registrations"
@@ -54,6 +56,7 @@ class EventRegistrations(Base):
     payment_status: Mapped[str] = mapped_column(default="pending", server_default=text("'pending'"))  
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone = True), nullable=True, default=None)
     receipt_email_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone = True), nullable=True, default=None)
+    host_confirmation_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone = True), nullable = True, default = None)
     custom_fields: Mapped[dict] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())

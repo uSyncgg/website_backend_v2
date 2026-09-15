@@ -13,14 +13,19 @@ from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
 from cachetools import TTLCache
 from app.services import PLATFORM_FEE_PERCENT, STRIPE_CURRENCY, STRIPE_PAYMENT_METHOD_TYPES
-from app.services.email import send_receipt_email
+from app.services.email import send_receipt_email, send_host_confirmation
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
 async def get_event_passes(path: str, db: AsyncSession) -> Sequence[EventPassesOut]:
     """
-    
+    Asynchronous function to get the event passes based on the input path.
+
+    ::param path the string containing the path to lookup
+    ::param db the Asynchronous database Session
+
+    ::return a sequence containing event passes validated by the EventPassesOut schema
     """
 
     path = f"/{path}"
@@ -45,7 +50,12 @@ async def get_event_passes(path: str, db: AsyncSession) -> Sequence[EventPassesO
 
 def craft_registration(payload: EventSubmissionIn, lan_pass: EventPassTiers) -> EventRegistrations:
     """
-    
+    Craft the registration object to be deposited.
+
+    ::param payload the form event submission from the frontend validated by EventSubmissionIn
+    ::param lan_pass the lan pass fetched and validated by EventPassTiers
+
+    ::return an event registration object validated by the EventRegistrations schema
     """
 
     fee = (lan_pass.price_cents * PLATFORM_FEE_PERCENT + 50) // 100
@@ -70,7 +80,12 @@ def craft_registration(payload: EventSubmissionIn, lan_pass: EventPassTiers) -> 
 
 async def deposit_registration(registration: EventRegistrations, db: AsyncSession) -> EventRegistrations:
     """
-    
+    Asynchronous function to deposit the registration into the database.
+
+    ::param registration the registration object that was crafted and validated by the EventRegistrations schema
+    ::param db the Asynchronous database Session
+
+    ::return the event registration initially passed in
     """
 
     db.add(registration)
@@ -91,7 +106,10 @@ async def deposit_registration(registration: EventRegistrations, db: AsyncSessio
 
 async def check_and_claim(registration: EventRegistrations, db: AsyncSession) -> None:
     """
-    
+    Asynchronous function to check if any passes are left and claim one if so.
+
+    ::param registration the registration object crafted and validated by the EventRegistrations schema
+    ::param db the Asynchronous database Session
     """
 
     claim_stmt = (
@@ -112,7 +130,10 @@ async def check_and_claim(registration: EventRegistrations, db: AsyncSession) ->
 
 def validate_form_fields(form_fields: list[dict], custom_fields: dict) -> None:
     """
-    
+    Form field validation function ensuring all form fields are provided.
+
+    ::param form_fields the list of dictionaries containing the form fields collected
+    ::param custom_fields the dictionary containing the custom field information collected
     """
 
     for field in form_fields:
@@ -126,8 +147,14 @@ def validate_form_fields(form_fields: list[dict], custom_fields: dict) -> None:
 
 async def deposit_form_data(payload: EventSubmissionIn, db: AsyncSession) -> EventSubmissionOut:
     """
-    
+    Asynchronous function to deposit the form data in the DB.
+
+    ::param payload the event submission payload sent from the frontend and validated by the EventSubmissionIn schema
+    ::param db the Asynchronous database Session
+
+    ::return the event submission out object validated by the EventSubmissionOut schema
     """
+
     pass_stmt = (
         select(EventPassTiers)
         .where(EventPassTiers.id == payload.pass_tier_id, EventPassTiers.is_active.is_(True))
@@ -157,7 +184,13 @@ async def deposit_form_data(payload: EventSubmissionIn, db: AsyncSession) -> Eve
 
 async def get_or_create_payment_intent(registration_id: uuid.UUID, db: AsyncSession, stripeClient: StripeClient) -> PaymentIntentOut:
     """
-    
+    Asynchronous function to get or create the Stripe Payment Intent object.
+
+    ::param registration_id the uuid4 containing the registration id
+    ::param db the Asynchronous database Session
+    ::param stripeClient the StripeClient to interface with Stripe
+
+    ::return the payment intent information validated by the PaymentIntentOut schema
     """
 
     stmt = select(EventRegistrations).where(EventRegistrations.id == registration_id)
@@ -191,39 +224,122 @@ async def get_or_create_payment_intent(registration_id: uuid.UUID, db: AsyncSess
     
     return PaymentIntentOut(client_secret=intent.client_secret, total_snapshot_cents=registration.total_snapshot_cents)
 
-async def check_and_send(registration: EventRegistrations, db: AsyncSession) -> None:
+async def check_and_send(registration: EventRegistrations, db: AsyncSession, event_name: str) -> None:
     """
-    
+    Asynchronous function to check if a payment was paid and that no email has been sent and then send the receipt email.
+
+    ::param registration the event registration validated by the EventRegistrations schema
+    ::param db the Asynchronous database Session
+    ::param event_name the string containing the event name
     """
 
-    if registration.payment_status != "paid" or registration.receipt_email_sent_at is not None:
+    if registration.payment_status != "paid":
         return None
 
-    stmt = select(LanEvents.name).where(LanEvents.event_id == registration.event_id)
-    result = await db.execute(stmt)
-    name = result.scalars().first()
+    claim_stmt = (
+        update(EventRegistrations)
+        .where(EventRegistrations.id == registration.id, EventRegistrations.receipt_email_sent_at.is_(None))
+        .values(receipt_email_sent_at=datetime.now(timezone.utc))
+    )
+
+    try:
+        result = await db.execute(claim_stmt)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.exception("Error claiming receipt email send")
+        return None
+
+    if result.rowcount == 0:
+        return None
+
+    registration.receipt_email_sent_at = datetime.now(timezone.utc)
 
     await send_receipt_email(
         to = registration.contact_email,
         display_name = registration.contact_username or "there",
         total_snapshot_cents = registration.total_snapshot_cents,
-        event_name = name,
+        event_name = event_name,
         id = registration.id
     )
 
-    registration.receipt_email_sent_at = datetime.now(timezone.utc)
+    return None
+
+async def host_confirmation(event_pass: EventPassTiers, event_name: str, registration: EventRegistrations, db: AsyncSession) -> None:
+    """
+    Asynchronous function to check if a buyer paid and if a confirmation hasn't been sent and send a confirmation email to the host.
+
+    ::param event_pass the event pass tiers object validated by the EventPassTiers schema
+    ::param event_name the string containing the event name
+    ::param registration the event registration object validated by EventRegistrations
+    ::param db the Asynchronous database Session
+    """
+
+    if registration.payment_status != "paid":
+        return None
+
+    claim_stmt = (
+        update(EventRegistrations)
+        .where(EventRegistrations.id == registration.id, EventRegistrations.host_confirmation_sent_at.is_(None))
+        .values(host_confirmation_sent_at=datetime.now(timezone.utc))
+    )
 
     try:
+        result = await db.execute(claim_stmt)
         await db.commit()
     except Exception:
         await db.rollback()
-        logger.exception(f"Error inputting email time")
+        logger.exception("Error claiming host confirmation email send")
+        return None
+
+    if result.rowcount == 0:
+        return None
+
+    registration.host_confirmation_sent_at = datetime.now(timezone.utc)
+
+    await send_host_confirmation(
+        to = event_pass.host_email,
+        event_name = event_name,
+        player_info = registration.player_info,
+        custom_fields = registration.custom_fields,
+        pass_snapshot_cents = registration.price_snapshot_cents,
+        display_name = registration.contact_username,
+        pass_name = event_pass.tier_name
+    )
 
     return None
 
+async def get_pass_event_helper(registration: EventRegistrations, db: AsyncSession) -> tuple[EventPassTiers, str | None]:
+    """
+    Asynchronous function to fetch the event pass and event name based on the registration.
+
+    ::param registration the event registration fetched prior
+    ::param db the Asynchronous database Session
+
+    ::return a tuple containing a valid event pass tier verified from the schema and either a string or None depending on the result
+    """
+
+    pass_stmt = select(EventPassTiers).where(EventPassTiers.id == registration.pass_tier_id)
+    result = await db.execute(pass_stmt)
+    event_pass = result.scalars().first()
+
+    if event_pass is None:
+        raise HTTPException(status_code=404, detail="Event Pass not found")
+
+    event_stmt = select(LanEvents.name).where(LanEvents.event_id == registration.event_id)
+    result = await db.execute(event_stmt)
+    event_name = result.scalars().first()
+
+    return event_pass, event_name
+
 async def get_receipt(registration_id: uuid.UUID, db: AsyncSession) -> ReceiptOut:
     """
-    
+    Asynchronous function to get the receipt information and call the automatic email functions.
+
+    ::param registration_id the uuid4 representing the registration id
+    ::param db the Asynchronous database Session
+
+    ::return a receipt validated by the ReceiptOut schema
     """
 
     stmt = select(EventRegistrations).where(EventRegistrations.id == registration_id)
@@ -233,10 +349,18 @@ async def get_receipt(registration_id: uuid.UUID, db: AsyncSession) -> ReceiptOu
     if registration is None:
         raise HTTPException(status_code=404, detail="Registration not found")
 
+    event_pass, event_name = await get_pass_event_helper(registration, db)
+    
     try:
-        await check_and_send(registration, db)
+        await check_and_send(registration, db, event_name)
     except Exception:
         logger.exception("Failed to send receipt email for registration %s", registration.id)
+        pass
+
+    try:
+        await host_confirmation(event_pass, event_name, registration, db)
+    except Exception:
+        logger.exception(f"Failed to send host confirmation email {event_pass.id}")
         pass
     
     return ReceiptOut(

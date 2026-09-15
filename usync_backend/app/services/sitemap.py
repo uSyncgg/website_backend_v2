@@ -17,7 +17,11 @@ BASE_URL = "https://www.usync.gg"
 
 def _format_sitemap_entries(entries: dict[str, list[dict[str, Any]]]) -> list[dict]:
     """
-    
+    Helper function to format sitemap entires appropriately.
+
+    ::param entries the dictionary containing all sitemap entries
+
+    ::return an formatted list dictionaries
     """
 
     sitemap_entries = []
@@ -40,7 +44,12 @@ def _format_sitemap_entries(entries: dict[str, list[dict[str, Any]]]) -> list[di
 
 async def _fetch_sitemap_entries(db: AsyncSession, event: str) -> list[dict]:
     """
-    
+    Asynchronous helper function to fetch all sitemap entries based on event.
+
+    ::param db the Asynchronous database Session
+    ::param event the string containing the event
+
+    ::return a list of dictionaries containing all fetched entries
     """
 
     table = EVENT_TYPE_LOOKUP[event]
@@ -56,7 +65,11 @@ async def _fetch_sitemap_entries(db: AsyncSession, event: str) -> list[dict]:
 
 async def _to_sitemap_xml(db: AsyncSession) -> bytes:
     """
-    
+    Asynchronous helper function to write all entries to the sitemap and convert it into bytes.
+
+    ::param db the Asynchronous database Session
+
+    ::return the bytes of the generated sitemap
     """
 
     entries = {}
@@ -79,7 +92,12 @@ async def _to_sitemap_xml(db: AsyncSession) -> bytes:
 
 async def get_sitemap_xml(db: AsyncSession, cache: TTLCache) -> bytes:
     """
-    
+    Asynchronous function to fetch the sitemap from the cache or regenerate it if invalidated.
+
+    ::param db the Asynchronous database Session
+    ::param cache the TTLCache to lookup and possibly repopulate
+
+    ::return the bytes of the sitemap
     """
 
     if xml := cache.get("sitemap"):
@@ -91,7 +109,9 @@ async def get_sitemap_xml(db: AsyncSession, cache: TTLCache) -> bytes:
 
 async def invalidate_sitemap_cache(cache: TTLCache) -> None:
     """
-    
+    Asynchronous function to invalidate the sitemap from the cache by popping it.
+
+    ::param cache the TTLCache to remove the sitemap from
     """
 
     cache.pop("sitemap", None)

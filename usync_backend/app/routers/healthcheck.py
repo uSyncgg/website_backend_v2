@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 router = APIRouter(tags=["Healthchecks"])
 
+### NOTE: Need to fix how the healthchecks are done.
 @router.get("/health")
 async def healthcheck():
     """

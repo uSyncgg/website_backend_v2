@@ -71,9 +71,16 @@ def league_nesting(leagues: Sequence[LeagueEvents], league_parents: Sequence[Lea
 
     return fin_list
 
-async def get_league_information(path: str, game: str,  db: AsyncSession, parent: bool = True):
+async def get_league_information(path: str, game: str, db: AsyncSession, parent: bool = True) -> LeagueEvents | LeagueParentEvents:
     """
-    
+    Asynchronous function to get league or league parent information based on provided params.
+
+    ::param path the string param containing the path for the event
+    ::param game the string containing the game of the event
+    ::param db the Asynchronous database Session
+    ::param parent a bool indicating whther we are looking for the parent or child information
+
+    ::return either a league event or league parent event validated by either LeagueEvents or LeagueParentEvents
     """
 
     if parent is False:
@@ -97,7 +104,12 @@ async def get_league_information(path: str, game: str,  db: AsyncSession, parent
 
 async def get_lan_information(path: str, db: AsyncSession) -> LanEvents:
     """
-    
+    Asynchronous function to get lan information based on provided params.
+
+    ::param path the string containing the path of the lan
+    ::param db the Asynchronous database Session
+
+    ::return a lan event validated by the LanEvents schema
     """
 
     path = f"/{path}"
@@ -117,7 +129,14 @@ async def get_lan_information(path: str, db: AsyncSession) -> LanEvents:
 
 async def get_event_by_path(event_type: str, game: str, path: str, db: AsyncSession) -> EventUnion:
     """
-    
+    Asynchronous function to get an event by its path.
+
+    ::param event_type the string containing the event type
+    ::param game the string containing the game
+    ::param path the string containing the path
+    ::param db the Asynchronous database Session
+
+    ::return an event validated by its respective schema in the EventUnion
     """
 
     event_class = EVENT_TYPE_LOOKUP.get(event_type)
@@ -139,32 +158,14 @@ async def get_event_by_path(event_type: str, game: str, path: str, db: AsyncSess
 
     return event
 
-async def get_event(event_type: str, game: str, event_name: str, db: AsyncSession) -> EventUnion:
-    """
-    
-    """
-
-    event_class = EVENT_TYPE_LOOKUP.get(event_type)
-
-    if event_class is None:
-      raise HTTPException(status_code=404, detail=f"Unknown event type: {event_type}")
-
-    stmt = (
-        select(event_class)
-        .where(event_class.name == event_name, event_class.game == game)
-    )
-
-    result = await db.execute(stmt)
-    event = result.scalars().first()
-
-    if event is None:
-        raise HTTPException(status_code=404, detail=f"Event not found: {event_name}")
-
-    return event
-
 async def get_league_parents(game: str, db: AsyncSession) -> Sequence[LeagueParentEvents]:
     """
-    
+    Asynchronous function to get league parents for a game.
+
+    ::param game the string containing the game
+    ::param db the Asynchronous database Session
+
+    ::return a sequnce containing all league parents for a game validated by LeagueParentEvents
     """
 
     stmt = (
@@ -178,7 +179,13 @@ async def get_league_parents(game: str, db: AsyncSession) -> Sequence[LeaguePare
 
 async def get_league_children(game: str, parent: str, db: AsyncSession) -> Sequence[LeagueEvents]:
     """
-    
+    Asynchronous function to get all league children based on a parent.
+
+    ::param game the string containing the game
+    ::param parent the string containing the parent
+    ::param db the Asynchronous database Session
+
+    ::return a sequence containing league events validated by the LeagueEvents schema
     """
 
     stmt = (
@@ -196,7 +203,12 @@ async def get_league_children(game: str, parent: str, db: AsyncSession) -> Seque
 
 async def get_leagues(game: str, db: AsyncSession) -> Sequence[LeagueEvents]:
     """
-    
+    Asynchronous function to get all league events based on the game.
+
+    ::param game the string containing the game
+    ::param db the Asynchronous database Session
+
+    ::return all league events validated by the LeagueEvents schema
     """
 
     stmt = (
@@ -210,7 +222,12 @@ async def get_leagues(game: str, db: AsyncSession) -> Sequence[LeagueEvents]:
 
 async def get_lans(game: str, db: AsyncSession) -> Sequence[LanEvents]:
     """
-    
+    Asynchronous function to get all lans based on the game.
+
+    ::param game the string containing the game
+    ::param db the Asynchronous database Session
+
+    ::return all lan events validated by the LanEvents schema
     """
 
     stmt = (
@@ -224,7 +241,11 @@ async def get_lans(game: str, db: AsyncSession) -> Sequence[LanEvents]:
 
 async def get_all_lans(db: AsyncSession) -> Sequence[LanEvents]:
     """
-    
+    Asynchronous function to get all non-archived lans stored in the db.
+
+    ::param db the Asynchronous database Session
+
+    ::return all lan events validated by the LanEvents schema
     """
 
     stmt = (
@@ -238,7 +259,12 @@ async def get_all_lans(db: AsyncSession) -> Sequence[LanEvents]:
 
 async def get_wagers(game: str, db: AsyncSession) -> Sequence[WagerEvents]:
     """
-    
+    Asynchronous function to get all wagers based on the game.
+
+    ::param game the string containing the game
+    ::param db the Asynchronous database Session
+
+    ::return all wager events validated by the WagerEvents schema
     """
 
     stmt = (
@@ -252,7 +278,14 @@ async def get_wagers(game: str, db: AsyncSession) -> Sequence[WagerEvents]:
 
 async def get_xps(game: str, db: AsyncSession) -> Sequence[XpEvents]:
     """
-    
+    Asynchronous function to get all xp events based on the game.
+
+    ::param game the string containing the game
+    ::param db the Asynchronous database Session
+
+    ::return all xp events validated by the XpEvents schema
+
+    NOTE: XP events = Head-to-Head events
     """
 
     stmt = (
@@ -266,7 +299,12 @@ async def get_xps(game: str, db: AsyncSession) -> Sequence[XpEvents]:
 
 async def _build_verified_event(db: AsyncSession, game: str) -> dict[str, Sequence[EventUnion]]:
     """
-    
+    Asynchronous function to build all verified events based on the game.
+
+    ::param db the Asynchronous database Session
+    ::param game the string containing the game
+
+    ::return a dictionary where the key is the table name and the value are the verified events from that table
     """
 
     verified_events: dict[str, list[EventUnion]] = {}
@@ -293,13 +331,26 @@ async def _build_verified_event(db: AsyncSession, game: str) -> dict[str, Sequen
     return verified_events
 
 async def invalidate_verified_events_cache(cache: TTLCache, game: str) -> None:
+    """
+    Asynchronous function to invalidate the verified games TTL cache.
+
+    ::param cache the TTLCache to invalidate
+    ::param game the string containing the game to invalidate
+    """
+
     cache.pop(game, None)
 
     return None
 
 async def get_verified_events(game: str, db: AsyncSession, cache: TTLCache) -> dict[str, Sequence[EventUnion]]:
     """
-    
+    Asynchronous function to get all verified events based on a game.
+
+    ::param game the string containing the game
+    ::param db the Asynchronous database Session
+    ::param cache the TTLCache to populate with the verified events
+
+    ::return a dictionary where the keys are the table names and the values are sequences of validated events from that table
     """
 
     if (verified_events := cache.get(game)) is not None:
@@ -312,6 +363,14 @@ async def get_verified_events(game: str, db: AsyncSession, cache: TTLCache) -> d
     return verified_events
 
 async def populate_verified_events_cache(db: AsyncSession, cache: TTLCache) -> None:
+    """
+    Asynchronous function to populate the verified events cache on startup of the backend.
+
+    ::param db the Asynchronous database Session
+    ::param cache the TTLCache to populate    
+    """
+
+
     for game in GAMES:
         await get_verified_events(game, db, cache)
 

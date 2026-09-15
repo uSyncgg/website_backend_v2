@@ -11,7 +11,6 @@ from app.services.events import (
     get_xps, 
     get_league_parents, 
     league_nesting, 
-    get_event, 
     get_league_children, 
     get_event_by_path,
     get_lan_information,
@@ -42,7 +41,13 @@ async def league_children(game: str, parent: str, db: AsyncSession = Depends(get
 @router.get("/leagues/{game}/{path:path}/information", response_model = LeagueParentsOut | LeaguesOut)
 async def league_information(path: str, game: str, db: AsyncSession = Depends(get_db)):
     """
-    
+    GET route to fetch leagues or their parents.
+
+    ::param path the string containing the frontend path slug
+    ::param game the string containing the game
+    ::param db the Asynchronous Session depending on the local session to acquire the db object
+
+    ::return either a league parent or a league validated by either the LeagueParentsOut or LeaguesOut schema
     """
 
     parent = await get_league_information(path, game, db)
@@ -94,6 +99,19 @@ async def lans(db: AsyncSession = Depends(get_db)):
 
     return await get_all_lans(db)
 
+@router.get("/lans/{path}/information", response_model=EventModel)
+async def lan_information(path: str, db: AsyncSession = Depends(get_db)):
+    """
+    GET route to get a lan event's information.
+
+    ::param path the string containing the frontend path slug
+    ::param db the Asynchronous Session depending on the local session to acquire the db object
+
+    ::return a lan event validated by the EventModel schema union
+    """
+
+    return await get_lan_information(path, db)
+
 @router.get("/wagers/{game}", response_model=list[WagersOut])
 async def wagers(game: str, db: AsyncSession = Depends(get_db)):
     """
@@ -120,64 +138,47 @@ async def xps(game: str, db: AsyncSession = Depends(get_db)):
 
     return await get_xps(game, db)
 
-@router.get("/lans/{path}/information", response_model=EventModel)
-async def lan_information(path: str, db: AsyncSession = Depends(get_db)):
-    """
-    
-    """
-
-    return await get_lan_information(path, db)
-
 @router.get("/{event_type}/{game}/{path}", response_model = EventModel)
 async def event_information_by_path(event_type: str, game: str, path: str, db: AsyncSession = Depends(get_db)):
     """
-    
+    GET request to get an event's information by its path.
+
+    ::param event_type the string indicating the evetn's type
+    ::param game the string indicating what game the event is under
+    ::param path the string indicating the frontend path slug
+    ::param db the Asynchronous Session depending on the local session to acquire the db object
+
+    ::return an event validated by the EventModel schema union
     """
 
     return await get_event_by_path(event_type, game, path, db)
 
-@router.get("/{event_type}/{game}/{event}", response_model = EventModel)
-async def event_information(event_type: str, game: str, event: str, db: AsyncSession = Depends(get_db)):
-    """
-    Calls functionality to return event information for a specific event specified by the user.
-
-    ::param event_type the string denoting leagues, lans, wagers, head-to-head
-    ::param game the game string
-    ::param event the string denoting the event name
-    ::param db the asynchronous db session
-
-    ::return the response model containing event information
-    """
-
-    return await get_event(event_type, game, event, db)
-
 @router.get("/{game}/verified", response_model=dict[str, list[LeaguesOut | LeagueParentsOut | WagersOut | XpsOut | LansOut]])
 async def verified_events(game: str, db: AsyncSession = Depends(get_db), cache: TTLCache = Depends(get_verified_cache)):
     """
-    
+    GET route to fetch all verified events for a specific game.
+
+    ::param game the string containing the game to lookup
+    ::param db the Asynchronous Session depending on the local session to acquire the db object
+    ::param cache the TTL cache depending on the local session
+
+    ::return a dictionary containing a key showing the event type where its value is a list of events under that type validated by their respective schema
     """
 
     return await get_verified_events(game, db, cache)
 
+### NOTE: Need to modify verify sitemap token to be a general verify token function - will do when we setup the full invalidation for events.
 @router.post("/{game}/verified/invalidate")
 async def invalidate_verified_events(game: str, cache: TTLCache = Depends(get_verified_cache), _: None = Depends(verify_sitemap_token)):
+    """
+    POST route to invalidate the verified events when new verified events are posted.
+
+    ::param game the string containing the game to invalidate
+    ::param cache the TTL cache depending on the local session
+    ::param _ the token verification depending on the local session
+    """
+
     await invalidate_verified_events_cache(cache, game)
 
     return {"status": "invalidated"}
 
-
-@router.post("/form/review", response_model=FormReviewOut)
-def review_form_data(payload: FormReviewIn, db: AsyncSession = Depends(get_db)):
-    """
-    Calls functionality to review form data and return any issues with unique fields.
-    """
-
-    # Need to return function
-
-@router.post("/form/submit", response_model=FormSubmissionOut)
-def submit_form_data(payload: FormSubmissionIn, db: AsyncSession = Depends(get_db)):
-    """
-    Calls functionality to submit form data to the Supabase DB - If there is a duplicate record made at the exact moment of submission an error will be returned.
-    """
-
-    # Need to return function

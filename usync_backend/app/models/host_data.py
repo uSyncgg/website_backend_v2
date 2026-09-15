@@ -7,6 +7,10 @@ from sqlalchemy import ForeignKey, String, text, func, UniqueConstraint
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 
 class EventFormParent(Base):
+    """
+    SQL Alchemy model describing the events table.
+    """
+
     __tablename__ = "events"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, unique = True, default = uuid.uuid4)
@@ -14,6 +18,10 @@ class EventFormParent(Base):
     event_type: Mapped[str] = mapped_column()
 
 class LanEvents(Base):
+    """
+    SQL Alchemy model describing the lan_events table.
+    """
+
     __tablename__ = "lan_events"
 
     event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("events.id"), primary_key = True, unique = True, default = uuid.uuid4)
@@ -39,6 +47,10 @@ class LanEvents(Base):
     usync_pass: Mapped[bool] = mapped_column(default = False, server_default = text("false"))
 
 class LeagueParentEvents(Base):
+    """
+    SQL Alchemy model describing the league_parent_events table.
+    """
+
     __tablename__ = "league_parent_events"
     __table_args__ = (
         UniqueConstraint("game", "path", name="uq_league_parent_events_game_path"),
@@ -60,6 +72,10 @@ class LeagueParentEvents(Base):
     seo_description: Mapped[str | None] = mapped_column()
 
 class LeagueEvents(Base):
+    """
+    SQL Alchemy model describing the league_events table.
+    """
+    
     __tablename__ = "league_events"
     __table_args__ = (
         UniqueConstraint("game", "path", name="uq_league_events_game_path"),
@@ -88,6 +104,10 @@ class LeagueEvents(Base):
     seo_description: Mapped[str | None] = mapped_column()
 
 class XpEvents(Base):
+    """
+    SQL Alchemy model describing the xp_events table. AKA Head-to-Head events.
+    """
+    
     __tablename__ = "xp_events"
     __table_args__ = (
         UniqueConstraint("game", "path", name="uq_xp_events_game_path"),
@@ -112,6 +132,10 @@ class XpEvents(Base):
     seo_description: Mapped[str | None] = mapped_column()
 
 class WagerEvents(Base):
+    """
+    SQL Alchemy model describing the wager_events table.
+    """
+    
     __tablename__ = "wager_events"
     __table_args__ = (
         UniqueConstraint("game", "path", name="uq_wager_events_game_path"),

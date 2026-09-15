@@ -6,13 +6,20 @@ from sqlalchemy import ForeignKey, DateTime, text
 from datetime import datetime
 
 class TournamentParent(Base):
+    """
+    SQL Alchemy model describing the tournaments_parent table.
+    """
+    
     __tablename__ = "tournaments_parent"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, unique = True)
     game: Mapped[str] = mapped_column()
 
-# See note page right after notes on alembic to see notes about the tournaments table
 class CodTournament(Base):
+    """
+    SQL Alchemy model describing the cod_tournaments table.
+    """
+
     __tablename__ = "cod_tournaments"
 
     site_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tournaments_parent.id"), primary_key = True, unique = True)

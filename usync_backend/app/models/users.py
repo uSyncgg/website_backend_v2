@@ -6,6 +6,10 @@ from sqlalchemy import ForeignKey, String
 from sqlalchemy.dialects.postgresql import ARRAY
 
 class UsersParent(Base):
+    """
+    SQL Alchemy model describing the users table.
+    """
+
     __tablename__ = "users"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True)
@@ -14,6 +18,10 @@ class UsersParent(Base):
     status: Mapped[str | None] = mapped_column(nullable = True)
     
 class Players(Base):
+    """
+    SQL Alchemy model describing the players table.    
+    """
+    
     __tablename__ = "players"
     
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
@@ -28,6 +36,10 @@ class Players(Base):
     # Don't forget profile pic
 
 class Hosts(Base):
+    """
+    SQL Alchemy model describing the hosts table.
+    """
+
     __tablename__ = "hosts"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
@@ -39,6 +51,10 @@ class Hosts(Base):
     # Don't forget profile pic
 
 class Socials(Base):
+    """
+    SQL Alchemy model describing the socials table.
+    """
+
     __tablename__ = "socials"
 
     # Wont need user id since we will have this table be generated when a new user is generated
@@ -51,6 +67,9 @@ class Socials(Base):
     # Ask about other socials
 
 class EventSitesParent(Base):
+    """
+    SQL Alchemy model describing the event_site_usernames table.
+    """
     __tablename__ = "event_site_usernames"
 
     # Wont need user id since we will have this table be generated when a new player is generated
@@ -60,6 +79,10 @@ class EventSitesParent(Base):
     game: Mapped[str] = mapped_column()
 
 class CodEventSite(Base):
+    """
+    SQL Alchemy model describing the cod_site_usernames table.
+    """
+
     __tablename__ = "cod_site_usernames"
 
     # When these are linked is when we will want to create entries in site + tourney stats
@@ -69,6 +92,10 @@ class CodEventSite(Base):
     gb: Mapped[uuid.UUID | None] = mapped_column(unique = True, nullable = True)
     
 class StatisticsParent(Base):
+    """
+    SQL Alchemy model describing the statistics table.
+    """
+
     __tablename__ = "statistics"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
@@ -76,6 +103,10 @@ class StatisticsParent(Base):
     stat_type: Mapped[str] = mapped_column()
 
 class LanStatistics(Base):
+    """
+    SQL Alchemy model describing the lan_statistics table.
+    """
+
     __tablename__ = "lan_statistics"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
@@ -86,6 +117,10 @@ class LanStatistics(Base):
     status: Mapped[str] = mapped_column(default = "pending")
 
 class SiteStatistics(Base):
+    """
+    SQL Alchemy model describing the site_statistics table.
+    """
+
     __tablename__ = "site_statistics"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
@@ -97,6 +132,10 @@ class SiteStatistics(Base):
     site_url: Mapped[str | None] = mapped_column(nullable = True)
 
 class TournamentStatistics(Base):
+    """
+    SQL Alchemy model describing the tournament_statistics table.
+    """
+
     __tablename__ = "tournament_statistics"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
