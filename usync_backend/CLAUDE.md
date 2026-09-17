@@ -2,6 +2,20 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Contributor Workflow (read this first)
+
+**Deployment pipeline:** work flows `feature/* → staging_environment → main`. `staging_environment` is the **staging** branch; `main` is **production** (the live API). Contributors only ever go as far as staging — their PRs merge into `staging_environment`. Promoting staging to production (`main`) is done separately by Matthew (contact@usync.gg / GitHub `MOconnorUS`) and is **not** part of this loop.
+
+1. **Branch first — always.** Never make edits on `main` or `staging_environment`. At the start of any new feature, create a branch named `feature/<short-kebab-description>`. A PreToolUse hook (`.claude/hooks/guard-branch.sh`) blocks edits on both protected branches for everyone except the owner (identified by `git config user.email`), so this is required, not optional.
+2. **Stay up to date.** A SessionStart hook (`.claude/hooks/sync-staging.sh`) checks whether the feature branch is behind `origin/staging_environment` and, if so, tells Claude to proactively merge it in (resolving any conflicts in plain language) before doing other work. The `/new-pr` skill repeats this check right before opening the PR.
+3. **Build the feature**, following the layering and conventions described elsewhere in this file (router → service → model, absolute imports, `app/models/__init__.py` re-exports, etc.).
+4. **Open a PR** with the `new-pr` skill, which fills the uSync backend PR template (summary, affected endpoints/services, database changes, env vars) and opens the pull request **into `staging_environment`** (staging) — never `main`.
+5. **Review gate.** Matthew reviews every PR and either **Approves** (he merges to `staging_environment`) or **Requests changes**. Contributors must NOT merge their own PRs, and must NOT open PRs against `main` — only Matthew does that, through the owner-only `pr-to-main` skill (checked against his `git config user.email`).
+6. **Address feedback** by reading the PR review comments (`gh pr view --comments`) and pushing fixes to the same branch; this re-triggers review.
+7. **After merge,** delete the feature branch and start the loop again from step 1. Once changes are verified on staging, Matthew promotes `staging_environment` to `main` in a separate, owner-only production PR.
+
+See `COWORKER-GUIDE.md` for the plain-English version of this loop.
+
 ## Overview
 
 Async FastAPI backend for the usync.gg esports platform. It serves tournament data, handles host/event form submissions, user registration/verification, and Stripe payments. Persistence is a Supabase Postgres database accessed through async SQLAlchemy 2.0; schema changes are managed with Alembic.
