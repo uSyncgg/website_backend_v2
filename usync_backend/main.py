@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from stripe import StripeClient
 from dotenv import load_dotenv
 from cachetools import TTLCache
+from jwt import PyJWKClient
 
 from app.routers import tournaments
 from app.routers import healthcheck
@@ -17,9 +18,9 @@ from app.routers import sitemap
 from app.routers import event_registration
 from app.routers import webhooks
 
-from app.services import GAMES, STRIPE_SECRET_KEY
+from app.services import GAMES, STRIPE_SECRET_KEY, EVENT_TYPES
 from app.services.sitemap import get_sitemap_xml
-from app.services.events import populate_verified_events_cache
+from app.services.events import populate_verified_events_cache, populate_verified_events_type_cache
 
 load_dotenv()
 
@@ -39,10 +40,13 @@ async def lifespan(app: FastAPI):
 
     app.state.stripe = StripeClient(STRIPE_SECRET_KEY)
     app.state.sitemap_cache = TTLCache(maxsize=1, ttl=3600)
-    app.state.verified_cache = TTLCache(maxsize=len(GAMES), ttl=3600)
+    app.state.verified_cache = TTLCache(maxsize=len(GAMES) + len(EVENT_TYPES), ttl=3600)
+    app.state.jwk_client = PyJWKClient(os.getenv("SUPABASE_JWTK_URL"), cache_keys = True)
+
     async with AsyncSessionLocal() as db:
         await get_sitemap_xml(db, app.state.sitemap_cache)
         await populate_verified_events_cache(db, app.state.verified_cache)
+        await populate_verified_events_type_cache(db, app.state.verified_cache)
 
     yield
 

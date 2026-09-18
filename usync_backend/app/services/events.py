@@ -15,6 +15,13 @@ EVENT_TYPE_LOOKUP = {
     "head-to-head": XpEvents
 }
 
+EVENT_TYPE_STRING_LOOKUP = {
+    "leagues": "league_events",
+    "wagers": "wager_events",
+    "lans": "lan_events",
+    "head-to-head": "xp_events"
+}
+
 TABLE_NAME_LOOKUP = {
     "league_parent_events": LeagueParentEvents,
     "league_events": LeagueEvents,
@@ -373,5 +380,92 @@ async def populate_verified_events_cache(db: AsyncSession, cache: TTLCache) -> N
 
     for game in GAMES:
         await get_verified_events(game, db, cache)
+
+    return None
+
+async def _query_table(db: AsyncSession, table_name: str) -> Sequence[EventUnion]:
+    """
+    
+    """
+
+    table = TABLE_NAME_LOOKUP[table_name]
+
+    stmt = (
+        select(table)
+        .where(table.status != "pending", table.verified.is_(True))
+    )
+
+    result = await db.execute(stmt)
+    return result.scalars().all()
+
+async def _build_verified_event_type(db: AsyncSession, table_name: str) -> dict[str, Sequence[EventUnion]]:
+    """
+    Asynchronous function to build all verified events based on the event type.
+
+    ::param db the Asynchronous database Session
+    ::param table_name the string containing the table name
+
+    ::return a dictionary where the key is the table name and the value are the verified events from that table
+    """
+
+    verified_events: dict[str, list[EventUnion]] = {}
+    parent_names: set[str] = set()
+
+    if table_name == "league_events":
+        parent_events = await _query_table(db, "league_parent_events")
+        parent_names.update(event.name for event in parent_events)
+
+        events = await _query_table(db, table_name)
+        events = [event for event in events if event.group not in parent_names]
+    else:
+        events = await _query_table(db, table_name)
+
+    verified_events[table_name] = events
+
+    return verified_events
+
+async def invalidate_verified_events_type_cache(cache: TTLCache, table_name: str) -> None:
+    """
+    Asynchronous function to invalidate the verified games TTL cache by event type.
+
+    ::param cache the TTLCache to invalidate
+    ::param table_name the string containing the table name to invalidate
+    """
+
+    cache.pop(table_name, None)
+
+    return None
+
+async def get_verified_events_type(event_type: str, db: AsyncSession, cache: TTLCache) -> dict[str, Sequence[EventUnion]]:
+    """
+    Asynchronous function to get all verified events based on event type.
+
+    ::param event_type the string containing the event_type
+    ::param db the Asynchronous database Session
+    ::param cache the TTLCache to populate with the verified events
+
+    ::return a dictionary where the keys are the table names and the values are sequences of validated events from that table
+    """
+    table_name = EVENT_TYPE_STRING_LOOKUP[event_type]
+
+    if (verified_events := cache.get(table_name)) is not None:
+        return verified_events
+
+    verified_events = await _build_verified_event_type(db, table_name)
+
+    cache[table_name] = verified_events
+
+    return verified_events
+
+async def populate_verified_events_type_cache(db: AsyncSession, cache: TTLCache) -> None:
+    """
+    Asynchronous function to populate the verified events cache on startup of the backend based on event type.
+
+    ::param db the Asynchronous database Session
+    ::param cache the TTLCache to populate    
+    """
+
+    for event_type in EVENT_TYPE_STRING_LOOKUP:
+        await get_verified_events_type(event_type, db, cache)
 
     return None

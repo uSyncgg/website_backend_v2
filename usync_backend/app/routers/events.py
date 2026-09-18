@@ -17,7 +17,9 @@ from app.services.events import (
     get_league_information,
     get_verified_events,
     invalidate_verified_events_cache,
-    get_all_lans
+    get_all_lans,
+    get_verified_events_type,
+    invalidate_verified_events_type_cache
 )
 
 router = APIRouter(prefix="/events", tags=["Events"])
@@ -167,6 +169,20 @@ async def verified_events(game: str, db: AsyncSession = Depends(get_db), cache: 
 
     return await get_verified_events(game, db, cache)
 
+@router.get("/{event_type}/verified/event/type", response_model=dict[str, list[LeaguesOut | LeagueParentsOut | WagersOut | XpsOut | LansOut]])
+async def verified_events_type(event_type: str, db: AsyncSession = Depends(get_db), cache: TTLCache = Depends(get_verified_cache)):
+    """
+    GET route to fetch all verified events for a specific event type.
+
+    ::param event_type the string containing the table to query
+    ::param db the Asynchronous Session depending on the local session to acquire the db object
+    ::param cache the TTL cache depending on the local session
+
+    ::return a dictionary containing a key showing the event type where its value is a list of events under that type validated by their respective schema
+    """
+
+    return await get_verified_events_type(event_type, db, cache)
+
 ### NOTE: Need to modify verify sitemap token to be a general verify token function - will do when we setup the full invalidation for events.
 @router.post("/{game}/verified/invalidate")
 async def invalidate_verified_events(game: str, cache: TTLCache = Depends(get_verified_cache), _: None = Depends(verify_sitemap_token)):
@@ -179,6 +195,21 @@ async def invalidate_verified_events(game: str, cache: TTLCache = Depends(get_ve
     """
 
     await invalidate_verified_events_cache(cache, game)
+
+    return {"status": "invalidated"}
+
+### NOTE: Need to modify verify sitemap token to be a general verify token function - will do when we setup the full invalidation for events.
+@router.post("/{event_type}/verified/invalidate/event-type")
+async def invalidate_verified_events_type(event_type: str, cache: TTLCache = Depends(get_verified_cache), _: None = Depends(verify_sitemap_token)):
+    """
+    POST route to invalidate the verified events by event type when new verified events are posted.
+
+    ::param event_type the string containing the event type to invalidate
+    ::param cache the TTL cache depending on the local session
+    ::param _ the token verification depending on the local session
+    """
+
+    await invalidate_verified_events_type_cache(cache, event_type)
 
     return {"status": "invalidated"}
 

@@ -12,6 +12,7 @@ dependencies = [
     "fastapi-mail>=1.6.4",
     "psycopg2-binary>=2.9.12",
     "pydantic>=2.13.4",
+    "pyjwt[crypto]>=2.14.0",
     "python-dotenv>=1.2.2",
     "resend>=2.44.0",
     "sqlalchemy>=2.0.50",
