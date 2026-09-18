@@ -13,6 +13,13 @@ GAMES = [
     "Warzone"
 ]
 
+EVENT_TYPES = [
+    "league_events",
+    "wager_events",
+    "lan_events",
+    "xp_events"
+]
+
 PLATFORM_FEE_PERCENT = 5
 REGISTRATION_STATUSES = ["pending", "paid", "payment_failed", "canceled"]
 

@@ -1,12 +1,16 @@
 import os
+import jwt
 import secrets
 
 from collections.abc import AsyncGenerator
 from sqlalchemy.ext.asyncio import AsyncSession
 from stripe import StripeClient
-from fastapi import Request, Header, HTTPException, status
+from fastapi import Request, Header, HTTPException, status, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from .db import AsyncSessionLocal
 from cachetools import TTLCache
+
+bearer_scheme = HTTPBearer()
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """
@@ -60,3 +64,21 @@ def verify_sitemap_token(x_sitemap_token: str = Header(...)) -> None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
     return None
+
+def verify_supabase_jwt(request: Request, creds: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> dict:
+    """
+    
+    """
+
+    try:
+        signing_key = request.app.state.jwk_client.get_signing_key_from_jwt(creds.credentials)
+
+        return jwt.decode(
+            creds.credentials,
+            signing_key.key,
+            algorithms = ["ES256"],
+            audience = "authenticated"
+        )
+
+    except jwt.PyJWTError:
+        raise HTTPException(status_code = 401, detail = "Invalid or expired token")
