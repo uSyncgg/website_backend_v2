@@ -23,6 +23,7 @@ class LeaguesOut(BaseModel):
     is_college: bool
     seo_title: str | None
     seo_description: str | None
+    game: str
 
 class LeagueParentsOut(BaseModel):
     """
@@ -41,6 +42,7 @@ class LeagueParentsOut(BaseModel):
     is_college: bool
     seo_title: str | None
     seo_description: str | None
+    game: str
 
 class LansOut(BaseModel):
     """
@@ -65,6 +67,7 @@ class LansOut(BaseModel):
     seo_title: str | None
     seo_description: str | None
     usync_pass: bool
+    game: str
 
 class WagersOut(BaseModel):
     """
@@ -84,6 +87,7 @@ class WagersOut(BaseModel):
     path: str
     seo_title: str | None
     seo_description: str | None
+    game: str
 
 class XpsOut(BaseModel):
     """
@@ -103,3 +107,4 @@ class XpsOut(BaseModel):
     path: str
     seo_title: str | None
     seo_description: str | None
+    game: str
