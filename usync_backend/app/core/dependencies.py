@@ -9,6 +9,7 @@ from fastapi import Request, Header, HTTPException, status, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from .db import AsyncSessionLocal
 from cachetools import TTLCache
+from supabase import AsyncClient
 
 bearer_scheme = HTTPBearer()
 
@@ -82,3 +83,10 @@ def verify_supabase_jwt(request: Request, creds: HTTPAuthorizationCredentials = 
 
     except jwt.PyJWTError:
         raise HTTPException(status_code = 401, detail = "Invalid or expired token")
+
+def get_supabase(request: Request) -> AsyncClient:
+    """
+    
+    """
+
+    return request.app.state.supabase

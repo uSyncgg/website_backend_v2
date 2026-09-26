@@ -23,6 +23,7 @@ class UsersParent(Base):
     kick: Mapped[str | None] = mapped_column(nullable = True)
     discord: Mapped[str | None] = mapped_column(nullable = True)
     instagram: Mapped[str | None] = mapped_column(nullable = True)
+    profile_picture: Mapped[str | None] = mapped_column(nullable = True)
     bio: Mapped[str | None] = mapped_column(nullable = True)
     bracket_hosting: Mapped[bool] = mapped_column(default = True, server_default=text("true"))
     other_roles: Mapped[list[str] | None] = mapped_column(ARRAY(String), default = [], nullable = True)

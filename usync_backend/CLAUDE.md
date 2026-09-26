@@ -60,6 +60,12 @@ Request flow is layered: **router → service → model**, with **schema** (Pyda
 
 - DB access: inject `db: AsyncSession = Depends(get_db)` and pass it into the service.
 - Stripe: inject `stripeClient: StripeClient = Depends(get_stripe_client)` — never construct a Stripe client inside a handler; it lives on `app.state`.
+- Supabase (Storage and other HTTP APIs): inject `supabase: AsyncClient = Depends(get_supabase)`. It is built once in `lifespan` from `SUPABASE_URL` + `SUPABASE_SECRET_KEY` and lives on `app.state`. This is separate from `get_db` — the DB session talks to Postgres, the client talks to Supabase's HTTP APIs.
+- Auth: protect a route with `claims: dict = Depends(verify_supabase_jwt)` (expects `Authorization: Bearer <supabase access token>`). Take the user's identity from `claims["sub"]` / `claims["email"]`, never from the request body.
+
+### Profile picture uploads
+
+`app/services/users.py` validates uploads with Pillow (`_sanitize_pfp`, run via `run_in_threadpool`): 5 MB cap, JPEG/PNG/WebP only, then re-encoded to a 512×512 WebP (strips metadata). Files go to the `profile_pictures` Storage bucket under `<user_id>/<uuid>.webp`; if the DB insert fails afterwards, the uploaded file is removed.
 
 ### Data model patterns
 
@@ -70,10 +76,15 @@ Request flow is layered: **router → service → model**, with **schema** (Pyda
 
 ## Current state / gotchas
 
-- Only the `tournaments` router is wired into `main.py`. The `payment`, `webhooks`, `event_forms`, `host_forms`, `users`, and `verification` routers exist but are **not yet registered**, and most of their service functions are stubs (`# Need return function`). Wire the router into `main.py` and implement the service when building these out.
-- Import paths should be absolute from the package root (`from app.services...`). A few stub files use bare imports (`from services.webhooks import ...`) which will fail at import time — fix to `app.services...` when activating them.
-- Stripe currently uses the **test** key/webhook secret (`STRIPE_TEST_KEY`, `STRIPE_TEST_WEBHOOK_KEY`). Live keys exist in env but are not used yet.
+- Registered routers: `tournaments`, `healthcheck`, `events`, `sitemap`, `event_registration`, `webhooks`, `users`. The `payment`, `host_forms`, and `verification` routers exist but are **not yet registered**; stubs are marked `# Need return function` (also `/users/profile/update`). Wire the router into `main.py` and implement the service when building these out.
+- Import paths should be absolute from the package root (`from app.services...`).
+- Stripe mode is controlled by `STRIPE_LIVE_MODE` (default `false`): when false, the test key/webhook secret are used; when `true`, the live ones (`app/services/__init__.py`).
+- Transactional email is sent through **Resend** (`app/services/email.py`).
 
 ## Environment variables (`.env`, not committed)
 
-`SUPABASE_CONNECTION_URL`, `ASYNC_SUPABASE_CONNECTION_URL`, `STRIPE_KEY`, `STRIPE_TEST_KEY`, `STRIPE_TEST_WEBHOOK_KEY`, `STRIPE_LIVE_WEBHOOK_KEY`, `ZOHO_EMAIL`, `ZOHO_PASSWORD` (Zoho creds back transactional email via `fastapi-mail`).
+- **Database:** `SUPABASE_CONNECTION_URL` (Alembic, psycopg2), `ASYNC_SUPABASE_CONNECTION_URL` (runtime, asyncpg)
+- **Supabase APIs:** `SUPABASE_URL` (project URL, `https://<ref>.supabase.co` — not a Postgres connection string), `SUPABASE_SECRET_KEY` (`sb_secret_...`; bypasses RLS, backend only), `SUPABASE_JWTK_URL` (JWKS endpoint used to verify user JWTs)
+- **Stripe:** `STRIPE_LIVE_MODE`, `STRIPE_KEY`, `STRIPE_TEST_KEY`, `STRIPE_TEST_WEBHOOK_KEY`, `STRIPE_LIVE_WEBHOOK_KEY`
+- **Email:** `RESEND_API_KEY`
+- **Sitemap:** `SITEMAP_INVALIDATION_TOKEN` (checked against the `X-Sitemap-Token` header)
