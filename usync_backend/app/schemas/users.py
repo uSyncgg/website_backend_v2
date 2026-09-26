@@ -10,7 +10,6 @@ PLAYER_FIELDS = {
     "country",
     "interests",
     "other_games",
-    "bracket_hosting",
     "battlenet",
     "activision",
     "steam",
@@ -40,28 +39,27 @@ class PlayerDetails(BaseModel):
     gender: str
     date_of_birth: str
     country: str
-    interests: list[str] | None
-    other_games: str | None
-    bracket_hosting: str | None
-    battlenet: str | None
-    activision: str | None
-    steam: str | None
-    riot: str | None
-    cmg: str | None
-    gankster: str | None
-    faceit: str | None
-    battlefly: str | None
+    interests: list[str] | None = None
+    other_games: str | None = None
+    battlenet: str | None = None
+    activision: str | None = None
+    steam: str | None = None
+    riot: str | None = None
+    cmg: str | None = None
+    gankster: str | None = None
+    faceit: str | None = None
+    battlefly: str | None = None
 
 class HostDetails(BaseModel):
     """
     
     """
 
-    hosted_games: list[str] | None
-    other_hosted_games: str | None
+    hosted_games: list[str] | None = None
+    other_hosted_games: str | None = None
     organization: str
     host_country: str
-    event_types: list[str] | None
+    event_types: list[str] | None = None
 
 class RegistrationOut(BaseModel):
     """
@@ -85,6 +83,10 @@ class RegistrationIn(BaseModel):
     kick: str
     discord: str
     instagram: str
+    bracket_hosting: str | None = None
+    other_roles: list[str] | None = None
+    other_role_detail: str | None = None
+    venues: list[dict] | None = None
     player: PlayerDetails | None = None
     host: HostDetails | None = None
 

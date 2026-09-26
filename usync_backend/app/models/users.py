@@ -24,6 +24,9 @@ class UsersParent(Base):
     discord: Mapped[str | None] = mapped_column(nullable = True)
     instagram: Mapped[str | None] = mapped_column(nullable = True)
     bio: Mapped[str | None] = mapped_column(nullable = True)
+    bracket_hosting: Mapped[bool] = mapped_column(default = True, server_default=text("true"))
+    other_roles: Mapped[list[str] | None] = mapped_column(ARRAY(String), default = [], nullable = True)
+    other_role_detail: Mapped[str | None] = mapped_column(nullable = True) 
 
     __table_args__ = (
         Index("ix_users_username_player_unique", "username", unique=True,
@@ -51,7 +54,7 @@ class Players(Base):
     activision: Mapped[str | None] = mapped_column(unique = True, nullable = True)
     steam: Mapped[str | None] = mapped_column(unique = True, nullable = True)
     riot: Mapped[str | None] = mapped_column(unique = True, nullable = True)
-    games: Mapped[list[str]] = mapped_column(ARRAY(String), default = [])
+    games: Mapped[list[str]] = mapped_column(ARRAY(String), default = [], nullable = True)
     other_games: Mapped[str | None] = mapped_column(nullable = True)
     # Don't forget profile pic
 
@@ -64,12 +67,23 @@ class Hosts(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
-    games: Mapped[list[str]] = mapped_column(ARRAY(String), default = [])
+    games: Mapped[list[str]] = mapped_column(ARRAY(String), default = [], nullable = True)
     other_games: Mapped[str | None] = mapped_column(nullable = True)
     organization: Mapped[str] = mapped_column()
     host_country: Mapped[str] = mapped_column()
-    event_types: Mapped[list[str]] = mapped_column(ARRAY(String), default = [])
+    event_types: Mapped[list[str]] = mapped_column(ARRAY(String), default = [], nullable = True)
     # Don't forget profile pic
+
+class Venues(Base):
+    """
+    
+    """
+
+    __tablename__ = "venues"
+
+    id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), primary_key = True, default = uuid.uuid4)
+    venue_name: Mapped[str] = mapped_column(primary_key = True)
+    location: Mapped[str] = mapped_column()
 
 class CompetitiveSites(Base):
     """
