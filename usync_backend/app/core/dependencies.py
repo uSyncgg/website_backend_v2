@@ -10,6 +10,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from .db import AsyncSessionLocal
 from cachetools import TTLCache
 from supabase import AsyncClient
+from openai import AsyncOpenAI
 
 bearer_scheme = HTTPBearer()
 
@@ -90,3 +91,11 @@ def get_supabase(request: Request) -> AsyncClient:
     """
 
     return request.app.state.supabase
+
+
+def get_openai(request: Request) -> AsyncOpenAI:
+    """
+    
+    """
+
+    return request.app.state.openai

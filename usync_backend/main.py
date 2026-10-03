@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from cachetools import TTLCache
 from jwt import PyJWKClient
 from supabase import acreate_client
+from openai import AsyncOpenAI
 
 from app.routers import tournaments
 from app.routers import healthcheck
@@ -45,6 +46,7 @@ async def lifespan(app: FastAPI):
     app.state.verified_cache = TTLCache(maxsize=len(GAMES) + len(EVENT_TYPES), ttl=3600)
     app.state.jwk_client = PyJWKClient(os.getenv("SUPABASE_JWTK_URL"), cache_keys = True)
     app.state.supabase = await acreate_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SECRET_KEY"))
+    app.state.openai = AsyncOpenAI(api_key=os.getenv("OPENAI_SECRET_KEY"), timeout=10.0, max_retries=2)
 
     async with AsyncSessionLocal() as db:
         await get_sitemap_xml(db, app.state.sitemap_cache)

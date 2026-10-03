@@ -14,6 +14,7 @@ class UsersParent(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, unique = True)
     username: Mapped[str] = mapped_column()
+    canonical_username: Mapped[str] = mapped_column()
     email: Mapped[str] = mapped_column()
     is_player: Mapped[bool] = mapped_column()
     is_host: Mapped[bool] = mapped_column()
@@ -30,9 +31,9 @@ class UsersParent(Base):
     other_role_detail: Mapped[str | None] = mapped_column(nullable = True) 
 
     __table_args__ = (
-        Index("ix_users_username_player_unique", "username", unique=True,
+        Index("ix_users_username_player_unique", "canonical_username", unique=True,
             postgresql_where=text("is_player = true")),
-        Index("ix_users_username_host_unique", "username", unique=True,
+        Index("ix_users_username_host_unique", "canonical_username", unique=True,
             postgresql_where=text("is_host = true")),
     )
     
