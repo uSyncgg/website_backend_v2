@@ -10,6 +10,8 @@ from stripe import StripeClient
 from dotenv import load_dotenv
 from cachetools import TTLCache
 from jwt import PyJWKClient
+from supabase import acreate_client
+from openai import AsyncOpenAI
 
 from app.routers import tournaments
 from app.routers import healthcheck
@@ -17,6 +19,7 @@ from app.routers import events
 from app.routers import sitemap
 from app.routers import event_registration
 from app.routers import webhooks
+from app.routers import users
 
 from app.services import GAMES, STRIPE_SECRET_KEY, EVENT_TYPES
 from app.services.sitemap import get_sitemap_xml
@@ -42,6 +45,8 @@ async def lifespan(app: FastAPI):
     app.state.sitemap_cache = TTLCache(maxsize=1, ttl=3600)
     app.state.verified_cache = TTLCache(maxsize=len(GAMES) + len(EVENT_TYPES), ttl=3600)
     app.state.jwk_client = PyJWKClient(os.getenv("SUPABASE_JWTK_URL"), cache_keys = True)
+    app.state.supabase = await acreate_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SECRET_KEY"))
+    app.state.openai = AsyncOpenAI(api_key=os.getenv("OPENAI_SECRET_KEY"), timeout=10.0, max_retries=2)
 
     async with AsyncSessionLocal() as db:
         await get_sitemap_xml(db, app.state.sitemap_cache)
@@ -74,3 +79,4 @@ app.include_router(events.router)
 app.include_router(sitemap.router)
 app.include_router(event_registration.router)
 app.include_router(webhooks.router)
+app.include_router(users.router)
