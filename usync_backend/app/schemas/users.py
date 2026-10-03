@@ -125,6 +125,23 @@ class RegistrationIn(BaseModel):
 
         return self
 
+class Profile(BaseModel):
+    """
+    
+    """
+
+    username: str
+    verified: bool
+    is_player: bool
+    is_host: bool
+    bio: str | None = None
+    other_roles: list[str] | None = None
+    other_role_detail: str | None = None
+    games: list[str] | None = None
+    organization: str | None = None
+    host_games: list[str] | None = None
+    event_types: list[str] | None = None
+    venues: list[dict] | None = None
 
 class UpdateProfileIn(BaseModel):
     """
