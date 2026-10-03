@@ -11,7 +11,7 @@ from fastapi import HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.exc import IntegrityError
 from datetime import datetime, timezone
-from app.schemas.users import RegistrationIn, RegistrationOut, PlayerDetails, HostDetails
+from app.schemas.users import RegistrationIn, RegistrationOut, PlayerDetails, HostDetails, Profile
 from app.models.users import Players, Hosts, UsersParent, PlayerCompSiteAccounts, Venues
 from PIL import Image, ImageOps, UnidentifiedImageError
 from supabase import AsyncClient
@@ -383,3 +383,85 @@ async def check_valid_username(
             raise HTTPException(status_code = 409, detail="Username is taken.")
 
     return None
+
+def _build_profile(user: UsersParent, player: Players | None, host: Hosts | None, venues: list[Venues]) -> Profile:
+    """
+    
+    """
+
+    profile = Profile(
+        username = user.username,
+        verified = user.verified,
+        is_player = user.is_player,
+        is_host = user.is_host,
+        bio = user.bio,
+        other_roles = user.other_roles,
+        other_role_detail = user.other_role_detail
+    )
+
+    if player:
+        profile.games = player.games
+
+    if host:
+        profile.host_games = host.games
+        profile.organization = host.organization
+        profile.event_types = host.event_types
+
+    if len(venues) > 0:
+        venue_list = []
+
+        for venue in venues:
+            venue_list.append({"name": venue.venue_name, "location": venue.location})
+
+        profile.venues = venue_list
+
+    return profile
+
+async def get_profile(username: str, db: AsyncSession) -> Profile:
+    """
+    
+    """
+    canonical = _canonical_username(username)
+
+    player = None
+    host = None
+    venues = []
+
+    user_stmt = (
+        select(UsersParent)
+        .where(UsersParent.canonical_username == canonical)
+    )
+
+    result = await db.execute(user_stmt)
+    user = result.scalars().first()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User does not exist.")
+
+    player_stmt = (
+        select(Players)
+        .where(Players.user_id == user.id)
+    )
+
+    result = await db.execute(player_stmt)
+    player = result.scalars().first() 
+
+    host_stmt = (
+        select(Hosts)
+        .where(Hosts.user_id == user.id)
+    )
+
+    result = await db.execute(host_stmt)
+    host = result.scalars().first()
+
+    venue_stmt = (
+        select(Venues)
+        .where(Venues.id == user.id)
+    )
+
+    result = await db.execute(venue_stmt)
+    venues = result.scalars().all()
+
+    return _build_profile(user, player, host, venues)
+
+    

@@ -28,7 +28,8 @@ class UsersParent(Base):
     bio: Mapped[str | None] = mapped_column(nullable = True)
     bracket_hosting: Mapped[bool] = mapped_column(default = True, server_default=text("true"))
     other_roles: Mapped[list[str] | None] = mapped_column(ARRAY(String), default = [], nullable = True)
-    other_role_detail: Mapped[str | None] = mapped_column(nullable = True) 
+    other_role_detail: Mapped[str | None] = mapped_column(nullable = True)
+    verified: Mapped[bool] = mapped_column(default = False, server_default=text("false"))
 
     __table_args__ = (
         Index("ix_users_username_player_unique", "canonical_username", unique=True,

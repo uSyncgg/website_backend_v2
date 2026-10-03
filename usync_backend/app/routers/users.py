@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends, File, Form, UploadFile, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.dependencies import get_db, verify_supabase_jwt, get_supabase, get_openai
-from app.schemas.users import UpdateProfileIn, UpdateProfileOut, RegistrationIn, RegistrationOut
-from app.services.users import handle_registration, process_pfp, check_valid_username
+from app.schemas.users import UpdateProfileIn, UpdateProfileOut, RegistrationIn, RegistrationOut, Profile
+from app.services.users import handle_registration, process_pfp, check_valid_username, get_profile
 from pydantic import ValidationError
 from supabase import AsyncClient
 from openai import AsyncOpenAI
@@ -53,6 +53,16 @@ async def checkUsername(username: str, player: bool | None = None, host: bool | 
     """
 
     return await check_valid_username(username, db, openai, ("path", "username"), player, host)
+
+@router.get("/fetch/{username}/profile", response_model = Profile)
+async def getProfile(username: str, db: AsyncSession = Depends(get_db), claims: dict = Depends(verify_supabase_jwt)):
+    """
+    
+    """
+
+    claims["sub"]
+
+    return await get_profile(username, db)
 
 @router.post("/profile/update", response_model=UpdateProfileOut)
 async def updateProfile(payload: UpdateProfileIn, db: AsyncSession = Depends(get_db)):
