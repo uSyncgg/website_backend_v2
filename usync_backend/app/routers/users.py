@@ -55,12 +55,10 @@ async def checkUsername(username: str, player: bool | None = None, host: bool | 
     return await check_valid_username(username, db, openai, ("path", "username"), player, host)
 
 @router.get("/fetch/{username}/profile", response_model = Profile)
-async def getProfile(username: str, db: AsyncSession = Depends(get_db), claims: dict = Depends(verify_supabase_jwt)):
+async def getProfile(username: str, db: AsyncSession = Depends(get_db)):
     """
     
     """
-
-    claims["sub"]
 
     return await get_profile(username, db)
 
