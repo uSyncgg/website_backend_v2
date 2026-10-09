@@ -75,12 +75,16 @@ def verify_supabase_jwt(request: Request, creds: HTTPAuthorizationCredentials = 
     try:
         signing_key = request.app.state.jwk_client.get_signing_key_from_jwt(creds.credentials)
 
-        return jwt.decode(
+        claims = jwt.decode(
             creds.credentials,
             signing_key.key,
             algorithms = ["ES256"],
             audience = "authenticated"
         )
+
+        request.state.user_id = claims["sub"]
+
+        return claims
 
     except jwt.PyJWTError:
         raise HTTPException(status_code = 401, detail = "Invalid or expired token")

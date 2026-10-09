@@ -1,6 +1,7 @@
-from fastapi import APIRouter, Depends, File, Form, UploadFile, HTTPException
+from fastapi import APIRouter, Depends, File, Form, UploadFile, HTTPException, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.dependencies import get_db, verify_supabase_jwt, get_supabase, get_openai
+from app.core.limiter import limiter, STRICT_REGISTER, STRICT_USERNAME_CHECK, MODERATE
 from app.schemas.users import UpdateProfileIn, UpdateProfileOut, RegistrationIn, RegistrationOut, Profile, Me
 from app.services.users import handle_registration, process_pfp, check_valid_username, get_profile, get_me
 from pydantic import ValidationError
@@ -10,7 +11,10 @@ from openai import AsyncOpenAI
 router = APIRouter(prefix="/users", tags=["Users"])
 
 @router.post("/register", response_model=RegistrationOut)
+@limiter.limit(STRICT_REGISTER)
 async def registerUser(
+    request: Request,
+    response: Response,
     data: str = Form(...), 
     profile_picture: UploadFile | None = File(None), 
     claims: dict = Depends(verify_supabase_jwt), 
@@ -55,7 +59,8 @@ async def getMe(claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = 
     return await get_me(claims["sub"], db)
 
 @router.get("/check/{username}")
-async def checkUsername(username: str, player: bool | None = None, host: bool | None = None, db: AsyncSession = Depends(get_db), openai: AsyncOpenAI = Depends(get_openai)):
+@limiter.limit(STRICT_USERNAME_CHECK)
+async def checkUsername(request: Request, response: Response, username: str, player: bool | None = None, host: bool | None = None, db: AsyncSession = Depends(get_db), openai: AsyncOpenAI = Depends(get_openai)):
     """
     
     """
@@ -71,7 +76,8 @@ async def getProfile(username: str, db: AsyncSession = Depends(get_db)):
     return await get_profile(username, db)
 
 @router.post("/profile/update", response_model=UpdateProfileOut)
-async def updateProfile(payload: UpdateProfileIn, db: AsyncSession = Depends(get_db)):
+@limiter.limit(MODERATE)
+async def updateProfile(request: Request, response: Response, payload: UpdateProfileIn, db: AsyncSession = Depends(get_db)):
     """
     Calls functionality to update a users profile information.
     """
