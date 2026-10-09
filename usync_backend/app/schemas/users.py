@@ -143,6 +143,14 @@ class Profile(BaseModel):
     event_types: list[str] | None = None
     venues: list[dict] | None = None
 
+class Me(BaseModel):
+    """
+    Validation class for the response payload information for the /me endpoint.
+    """
+
+    username: str
+    profile_picture: str | None = None
+
 class UpdateProfileIn(BaseModel):
     """
     Validation class for payload information for the /profile/update endpoint.
