@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends
 from fastapi.responses import Response
 from app.core.dependencies import get_sitemap_cache, get_db, verify_sitemap_token
+from app.core.limiter import limiter
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.services.sitemap import get_sitemap_xml, invalidate_sitemap_cache
 from cachetools import TTLCache
@@ -21,6 +22,7 @@ async def get_sitemap(db: AsyncSession = Depends(get_db), cache: TTLCache = Depe
     return Response(content=xml, media_type="application/xml")
 
 @router.post("/sitemap/invalidate")
+@limiter.exempt
 async def invalidate_sitemap(cache: TTLCache = Depends(get_sitemap_cache), _: None = Depends(verify_sitemap_token)):
     """
     POST route to invalidate the sitemap.

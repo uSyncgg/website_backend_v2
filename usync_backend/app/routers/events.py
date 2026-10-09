@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.dependencies import get_db, get_verified_cache, verify_sitemap_token
+from app.core.limiter import limiter
 from app.schemas.event_forms import FormReviewIn, FormReviewOut, FormSubmissionIn, FormSubmissionOut
 from app.schemas.events import LeaguesOut, LansOut, WagersOut, XpsOut, LeagueParentsOut
 from cachetools import TTLCache
@@ -185,6 +186,7 @@ async def verified_events_type(event_type: str, db: AsyncSession = Depends(get_d
 
 ### NOTE: Need to modify verify sitemap token to be a general verify token function - will do when we setup the full invalidation for events.
 @router.post("/{game}/verified/invalidate")
+@limiter.exempt
 async def invalidate_verified_events(game: str, cache: TTLCache = Depends(get_verified_cache), _: None = Depends(verify_sitemap_token)):
     """
     POST route to invalidate the verified events when new verified events are posted.
@@ -200,6 +202,7 @@ async def invalidate_verified_events(game: str, cache: TTLCache = Depends(get_ve
 
 ### NOTE: Need to modify verify sitemap token to be a general verify token function - will do when we setup the full invalidation for events.
 @router.post("/{event_type}/verified/invalidate/event-type")
+@limiter.exempt
 async def invalidate_verified_events_type(event_type: str, cache: TTLCache = Depends(get_verified_cache), _: None = Depends(verify_sitemap_token)):
     """
     POST route to invalidate the verified events by event type when new verified events are posted.

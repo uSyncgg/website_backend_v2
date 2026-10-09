@@ -63,6 +63,10 @@ Request flow is layered: **router → service → model**, with **schema** (Pyda
 - Supabase (Storage and other HTTP APIs): inject `supabase: AsyncClient = Depends(get_supabase)`. It is built once in `lifespan` from `SUPABASE_URL` + `SUPABASE_SECRET_KEY` and lives on `app.state`. This is separate from `get_db` — the DB session talks to Postgres, the client talks to Supabase's HTTP APIs.
 - Auth: protect a route with `claims: dict = Depends(verify_supabase_jwt)` (expects `Authorization: Bearer <supabase access token>`). Take the user's identity from `claims["sub"]` / `claims["email"]`, never from the request body.
 
+### Rate limiting
+
+`app/core/limiter.py` holds the slowapi `limiter` and the tier constants (`STRICT_*`, `MODERATE`, `LOOSE`). Every route gets `LOOSE` by default through `SlowAPIASGIMiddleware`, so plain public reads need no changes. To give a route a stricter tier, add `@limiter.limit(<TIER>)` **below** the `@router` decorator, and the handler **must** take `request: Request` and `response: Response` (slowapi finds them by name and writes the `X-RateLimit-*` / `Retry-After` headers onto `response`). Mark health checks, webhooks, and token-guarded invalidation routes `@limiter.exempt`. Requests are keyed by user id when `verify_supabase_jwt` ran (it sets `request.state.user_id`), otherwise by client IP. Storage is in-memory, so limits are per process — switch `storage_uri` to Redis before running multiple workers/instances.
+
 ### Profile picture uploads
 
 `app/services/users.py` validates uploads with Pillow (`_sanitize_pfp`, run via `run_in_threadpool`): 5 MB cap, JPEG/PNG/WebP only, then re-encoded to a 512×512 WebP (strips metadata). Files go to the `profile_pictures` Storage bucket under `<user_id>/<uuid>.webp`; if the DB insert fails afterwards, the uploaded file is removed.
