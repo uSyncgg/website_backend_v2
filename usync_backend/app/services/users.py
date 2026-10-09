@@ -11,7 +11,7 @@ from fastapi import HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.exc import IntegrityError
 from datetime import datetime, timezone
-from app.schemas.users import RegistrationIn, RegistrationOut, PlayerDetails, HostDetails, Profile
+from app.schemas.users import RegistrationIn, RegistrationOut, PlayerDetails, HostDetails, Profile, Me
 from app.models.users import Players, Hosts, UsersParent, PlayerCompSiteAccounts, Venues
 from PIL import Image, ImageOps, UnidentifiedImageError
 from supabase import AsyncClient
@@ -400,9 +400,15 @@ def _build_profile(user: UsersParent, player: Players | None, host: Hosts | None
     )
 
     if player:
+        if "Other" in player.games:
+            player.games.pop(player.games.index("Other"))
+
         profile.games = player.games
 
     if host:
+        if "Other" in host.games:
+            host.games.pop(host.games.index("Other"))
+
         profile.host_games = host.games
         profile.organization = host.organization
         profile.event_types = host.event_types
@@ -464,4 +470,16 @@ async def get_profile(username: str, db: AsyncSession) -> Profile:
 
     return _build_profile(user, player, host, venues)
 
-    
+async def get_me(user_id: str, db: AsyncSession) -> Me:
+    """
+    Fetches the signed in user's navbar details. A 404 means the user has signed up
+    through Supabase but has not completed their profile yet.
+    """
+
+    result = await db.execute(select(UsersParent).where(UsersParent.id == user_id))
+    user = result.scalars().first()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="Profile not completed.")
+
+    return Me(username=user.username, profile_picture=user.profile_picture)
