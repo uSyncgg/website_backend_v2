@@ -168,7 +168,7 @@ class ProfileSettingsOut(BaseModel):
     other_role_detail: str | None = None
     profile_picture: str | None = None
 
-    games: list[str] | None = None
+    interests: list[str] | None = None
     other_games: str | None = None
     first_name: str | None = None
     last_name: str | None = None
@@ -178,8 +178,8 @@ class ProfileSettingsOut(BaseModel):
     country: str | None = None
 
     organization: str | None = None
-    host_games: list[str] | None = None
-    host_other_games: str | None = None
+    hosted_games: list[str] | None = None
+    other_hosted_games: str | None = None
     host_country: str | None = None
     event_types: list[str] | None = None
 

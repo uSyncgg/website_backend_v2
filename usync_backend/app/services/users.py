@@ -537,7 +537,7 @@ async def get_profile_settings(user_id: str, db: AsyncSession) -> ProfileSetting
         host = host_result.scalars().first()
 
     if player:
-        settings.games = player.games if player.games and len(player.games) > 0 else None
+        settings.interests = player.games if player.games and len(player.games) > 0 else None
         settings.other_games = player.other_games
         settings.first_name = player.first_name
         settings.last_name = player.last_name
@@ -548,8 +548,8 @@ async def get_profile_settings(user_id: str, db: AsyncSession) -> ProfileSetting
 
     if host:
         settings.organization = host.organization
-        settings.host_games = host.games if host.games and len(host.games) > 0 else None
-        settings.host_other_games = host.other_games
+        settings.hosted_games = host.games if host.games and len(host.games) > 0 else None
+        settings.other_hosted_games = host.other_games
         settings.host_country = host.host_country
         settings.event_types = host.event_types if host.event_types and len(host.event_types) > 0 else None
 
