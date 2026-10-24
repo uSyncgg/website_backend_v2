@@ -402,6 +402,9 @@ def _build_venues(venues: list[Venues]) -> list[dict]:
 
     venue_list = []
 
+    if len(venues) == 0:
+        return venue_list
+
     for venue in venues:
         venue_list.append({"name": venue.venue_name, "location": venue.location})
 
@@ -523,7 +526,7 @@ async def get_profile_settings(user_id: str, db: AsyncSession) -> ProfileSetting
         is_host = user.is_host,
         bio = user.bio,
         bracket_hosting = user.bracket_hosting,
-        other_roles = user.other_roles if user.other_roles and len(user.other_roles) > 0 else None,
+        other_roles = user.other_roles if user.other_roles else [],
         other_role_detail = user.other_role_detail,
         profile_picture = user.profile_picture
     )
@@ -537,7 +540,7 @@ async def get_profile_settings(user_id: str, db: AsyncSession) -> ProfileSetting
         host = host_result.scalars().first()
 
     if player:
-        settings.interests = player.games if player.games and len(player.games) > 0 else None
+        settings.interests = player.games if player.games else []
         settings.other_games = player.other_games
         settings.first_name = player.first_name
         settings.last_name = player.last_name
@@ -548,15 +551,15 @@ async def get_profile_settings(user_id: str, db: AsyncSession) -> ProfileSetting
 
     if host:
         settings.organization = host.organization
-        settings.hosted_games = host.games if host.games and len(host.games) > 0 else None
+        settings.hosted_games = host.games if host.games else []
         settings.other_hosted_games = host.other_games
         settings.host_country = host.host_country
-        settings.event_types = host.event_types if host.event_types and len(host.event_types) > 0 else None
+        settings.event_types = host.event_types if host.event_types else []
 
     venue_result = await db.execute(select(Venues).where(Venues.id == user_id))
     venues = venue_result.scalars().all()
 
-    settings.venues = _build_venues(venues) if len(venues) > 0 else None
+    settings.venues = _build_venues(venues)
 
     return settings
 

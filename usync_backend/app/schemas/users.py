@@ -158,17 +158,19 @@ class ProfileSettingsOut(BaseModel):
     
     """
 
+    model_config = ConfigDict(validate_assignment=True)
+
     username: str
     verified: bool
     is_player: bool
     is_host: bool
     bio: str | None = None
     bracket_hosting: bool
-    other_roles: list[str] | None = None
+    other_roles: list[str] = []
     other_role_detail: str | None = None
     profile_picture: str | None = None
 
-    interests: list[str] | None = None
+    interests: list[str] = []
     other_games: str | None = None
     first_name: str | None = None
     last_name: str | None = None
@@ -178,12 +180,12 @@ class ProfileSettingsOut(BaseModel):
     country: str | None = None
 
     organization: str | None = None
-    hosted_games: list[str] | None = None
+    hosted_games: list[str] = []
     other_hosted_games: str | None = None
     host_country: str | None = None
-    event_types: list[str] | None = None
+    event_types: list[str] = []
 
-    venues: list[dict] | None = None
+    venues: list[dict] = []
 
 class Updater(BaseModel):
     """
