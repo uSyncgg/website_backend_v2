@@ -510,8 +510,23 @@ async def get_profile_settings(user_id: str, db: AsyncSession) -> ProfileSetting
     user_result = await db.execute(select(UsersParent).where(UsersParent.id == user_id))
     user = user_result.scalars().first()
 
+    player = None
+    host = None
+
     if not user:
         raise HTTPException(status_code=404, detail="Profile not found.")
+
+    settings = ProfileSettingsOut(
+        username = user.username,
+        verified = user.verified,
+        is_player = user.is_player,
+        is_host = user.is_host,
+        bio = user.bio,
+        bracket_hosting = user.bracket_hosting,
+        other_roles = user.other_roles if user.other_roles and len(user.other_roles) > 0 else None,
+        other_role_detail = user.other_role_detail,
+        profile_picture = user.profile_picture
+    )
 
     if user.is_player:
         player_result = await db.execute(select(Players).where(Players.id == user_id))
@@ -521,37 +536,27 @@ async def get_profile_settings(user_id: str, db: AsyncSession) -> ProfileSetting
         host_result = await db.execute(select(Hosts).where(Hosts.id == user_id))
         host = host_result.scalars().first()
 
+    if player:
+        settings.games = player.games if player.games and len(player.games) > 0 else None
+        settings.other_games = player.other_games
+        settings.first_name = player.first_name
+        settings.last_name = player.last_name
+        settings.phone_number = player.phone_number
+        settings.gender = player.gender
+        settings.date_of_birth = player.date_of_birth
+        settings.country = player.country
+
+    if host:
+        settings.organization = host.organization
+        settings.host_games = host.games if host.games and len(host.games) > 0 else None
+        settings.host_other_games = host.other_games
+        settings.host_country = host.host_country
+        settings.event_types = host.event_types if host.event_types and len(host.event_types) > 0 else None
+
     venue_result = await db.execute(select(Venues).where(Venues.id == user_id))
     venues = venue_result.scalars().all()
 
-    settings = ProfileSettingsOut(
-        username = user.username,
-        verified = user.verified,
-        is_player = user.is_player,
-        is_host = user.is_host,
-        bio = user.bio,
-        bracket_hosting = user.bracket_hosting,
-        other_roles = user.other_roles if len(user.other_roles) > 0 else None,
-        other_role_detail = user.other_role_detail,
-        profile_picture = user.profile_picture,
-
-        games = player.games if len(player.games) > 0 else None,
-        other_games = player.other_games,
-        first_name = player.first_name,
-        last_name = player.last_name,
-        phone_number = player.phone_number,
-        gender = player.gender,
-        date_of_birth = player.date_of_birth,
-        country = player.country,
-
-        organization = host.organization,
-        host_games = host.games if len(host.games) > 0 else None,
-        host_other_games = host.other_games,
-        host_country = host.host_country,
-        event_types = host.event_types if len(host.event_types) > 0 else None,
-
-        venues = _build_venues(venues) if len(venues) > 0 else None,
-    )
+    settings.venues = _build_venues(venues) if len(venues) > 0 else None
 
     return settings
 

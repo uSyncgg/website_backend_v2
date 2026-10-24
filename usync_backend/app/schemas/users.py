@@ -170,8 +170,8 @@ class ProfileSettingsOut(BaseModel):
 
     games: list[str] | None = None
     other_games: str | None = None
-    first_name: str
-    last_name: str
+    first_name: str | None = None
+    last_name: str | None = None
     phone_number: str | None = None
     gender: str | None = None
     date_of_birth: str | None = None
