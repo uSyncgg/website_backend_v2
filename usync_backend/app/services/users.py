@@ -11,7 +11,18 @@ from fastapi import HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.exc import IntegrityError
 from datetime import datetime, timezone
-from app.schemas.users import RegistrationIn, RegistrationOut, PlayerDetails, HostDetails, Profile, Me
+from app.schemas.users import (
+    RegistrationIn, 
+    RegistrationOut, 
+    PlayerDetails, 
+    HostDetails, 
+    Profile, 
+    Me, 
+    ProfileSettingsOut, 
+    UserUpdate, 
+    PlayerUpdate, 
+    HostUpdate
+)
 from app.models.users import Players, Hosts, UsersParent, PlayerCompSiteAccounts, Venues
 from PIL import Image, ImageOps, UnidentifiedImageError
 from supabase import AsyncClient
@@ -107,7 +118,7 @@ def _build_user(payload: RegistrationIn, email: str, pfp_url: str, user_id: str)
         instagram = payload.instagram,
         profile_picture = pfp_url if pfp_url != "" else None,
         bio = payload.bio,
-        bracket_hosting = True if payload.bracket_hosting is None or payload.bracket_hosting == "yes" else False,
+        bracket_hosting = True if payload.bracket_hosting is None or payload.bracket_hosting is True else False,
         other_roles = payload.other_roles,
         other_role_detail = payload.other_role_detail
     )
@@ -384,6 +395,18 @@ async def check_valid_username(
 
     return None
 
+def _build_venues(venues: list[Venues]) -> list[dict]:
+    """
+    
+    """
+
+    venue_list = []
+
+    for venue in venues:
+        venue_list.append({"name": venue.venue_name, "location": venue.location})
+
+    return venue_list
+
 def _build_profile(user: UsersParent, player: Players | None, host: Hosts | None, venues: list[Venues]) -> Profile:
     """
     
@@ -414,12 +437,7 @@ def _build_profile(user: UsersParent, player: Players | None, host: Hosts | None
         profile.event_types = host.event_types
 
     if len(venues) > 0:
-        venue_list = []
-
-        for venue in venues:
-            venue_list.append({"name": venue.venue_name, "location": venue.location})
-
-        profile.venues = venue_list
+        profile.venues = _build_venues(venues)
 
     return profile
 
@@ -483,3 +501,68 @@ async def get_me(user_id: str, db: AsyncSession) -> Me:
         raise HTTPException(status_code=404, detail="Profile not completed.")
 
     return Me(username=user.username, profile_picture=user.profile_picture)
+
+async def get_profile_settings(user_id: str, db: AsyncSession) -> ProfileSettingsOut:
+    """
+    
+    """
+
+    user_result = await db.execute(select(UsersParent).where(UsersParent.id == user_id))
+    user = user_result.scalars().first()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="Profile not found.")
+
+    if user.is_player:
+        player_result = await db.execute(select(Players).where(Players.id == user_id))
+        player = player_result.scalars().first()
+
+    if user.is_host:
+        host_result = await db.execute(select(Hosts).where(Hosts.id == user_id))
+        host = host_result.scalars().first()
+
+    venue_result = await db.execute(select(Venues).where(Venues.id == user_id))
+    venues = venue_result.scalars().all()
+
+    settings = ProfileSettingsOut(
+        username = user.username,
+        verified = user.verified,
+        is_player = user.is_player,
+        is_host = user.is_host,
+        bio = user.bio,
+        bracket_hosting = user.bracket_hosting,
+        other_roles = user.other_roles if len(user.other_roles) > 0 else None,
+        other_role_detail = user.other_role_detail,
+        profile_picture = user.profile_picture,
+
+        games = player.games if len(player.games) > 0 else None,
+        other_games = player.other_games,
+        first_name = player.first_name,
+        last_name = player.last_name,
+        phone_number = player.phone_number,
+        gender = player.gender,
+        date_of_birth = player.date_of_birth,
+        country = player.country,
+
+        organization = host.organization,
+        host_games = host.games if len(host.games) > 0 else None,
+        host_other_games = host.other_games,
+        host_country = host.host_country,
+        event_types = host.event_types if len(host.event_types) > 0 else None,
+
+        venues = _build_venues(venues) if len(venues) > 0 else None,
+    )
+
+    return settings
+
+async def updateUser(
+    user_id: str, 
+    table: UsersParent | Players | Hosts, 
+    payload: UserUpdate | PlayerUpdate | HostUpdate,
+    db: AsyncSession
+):
+    """
+    
+    """
+
+    result = update(table).where(table.id == user_id).values(**payload).returning(table)

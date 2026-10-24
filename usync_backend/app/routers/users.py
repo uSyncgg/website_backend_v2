@@ -2,8 +2,8 @@ from fastapi import APIRouter, Depends, File, Form, UploadFile, HTTPException, R
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.dependencies import get_db, verify_supabase_jwt, get_supabase, get_openai
 from app.core.limiter import limiter, STRICT_REGISTER, STRICT_USERNAME_CHECK, MODERATE
-from app.schemas.users import UpdateProfileIn, UpdateProfileOut, RegistrationIn, RegistrationOut, Profile, Me
-from app.services.users import handle_registration, process_pfp, check_valid_username, get_profile, get_me
+from app.schemas.users import RegistrationIn, RegistrationOut, Profile, Me, ProfileSettingsOut, UserUpdate, PlayerUpdate, HostUpdate
+from app.services.users import handle_registration, process_pfp, check_valid_username, get_profile, get_me, get_profile_settings
 from pydantic import ValidationError
 from supabase import AsyncClient
 from openai import AsyncOpenAI
@@ -60,7 +60,15 @@ async def getMe(claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = 
 
 @router.get("/check/{username}")
 @limiter.limit(STRICT_USERNAME_CHECK)
-async def checkUsername(request: Request, response: Response, username: str, player: bool | None = None, host: bool | None = None, db: AsyncSession = Depends(get_db), openai: AsyncOpenAI = Depends(get_openai)):
+async def checkUsername(
+    request: Request, 
+    response: Response, 
+    username: str, 
+    player: bool | None = None, 
+    host: bool | None = None, 
+    db: AsyncSession = Depends(get_db), 
+    openai: AsyncOpenAI = Depends(get_openai)
+):
     """
     
     """
@@ -75,11 +83,74 @@ async def getProfile(username: str, db: AsyncSession = Depends(get_db)):
 
     return await get_profile(username, db)
 
-@router.post("/profile/update", response_model=UpdateProfileOut)
-@limiter.limit(MODERATE)
-async def updateProfile(request: Request, response: Response, payload: UpdateProfileIn, db: AsyncSession = Depends(get_db)):
+@router.get("/me/settings", response_model = ProfileSettingsOut)
+async def getProfileSettings(request: Request, response: Response, db: AsyncSession = Depends(get_db), claims: dict = Depends(verify_supabase_jwt)):
     """
-    Calls functionality to update a users profile information.
+    
     """
 
-    # Need return function
+    user_id = claims["sub"]
+
+    return await get_profile_settings(user_id, db)
+
+@router.patch("/me/user", response_model="")
+@limiter.limit(MODERATE)
+async def updateUser(
+    request: Request, 
+    response: Response, 
+    user: UserUpdate, 
+    db: AsyncSession = Depends(get_db), 
+    claims: dict = Depends(verify_supabase_jwt)
+):
+    """
+    
+    """
+
+    user_id = claims["sub"]
+
+    try:
+        payload = user.model_dump(exclude_unset=True, by_alias=True)
+    except ValidationError as e:
+        raise HTTPException(status_code=422, detail=e.errors(include_context=False))
+
+@router.patch("/me/player", response_model = "")
+@limiter.limit(MODERATE)
+async def updatePlayer(
+    request: Request,
+    response: Response,
+    player: PlayerUpdate,
+    db: AsyncSession = Depends(get_db),
+    claims: dict = Depends(verify_supabase_jwt)
+):
+    """
+    
+    """
+
+    user_id = claims["sub"]
+
+    try:
+        payload = player.model_dump(exclude_unset=True, by_alias=True)
+    except ValidationError as e:
+        raise HTTPException(status_code=422, detail=e.errors(include_context=False))
+
+@router.patch("/me/host", response_model = "")
+@limiter.limit(MODERATE)
+async def updateHost(
+    request: Request,
+    response: Response,
+    host: HostUpdate,
+    db: AsyncSession = Depends(get_db),
+    claims: dict = Depends(verify_supabase_jwt)
+):
+    """
+    
+    """
+
+    user_id = claims["sub"]
+
+    try:
+        payload = host.model_dump(exclude_unset=True, by_alias=True)
+    except ValidationError as e:
+        raise HTTPException(status_code=422, detail=e.errors(include_context=False))
+
+
