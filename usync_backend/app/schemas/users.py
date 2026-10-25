@@ -1,7 +1,7 @@
 import re
 
 from datetime import date
-from pydantic import BaseModel, model_validator, ConfigDict, StringConstraints, Field, BeforeValidator, AfterValidator
+from pydantic import BaseModel, model_validator, ConfigDict, StringConstraints, Field, BeforeValidator, AfterValidator, PlainSerializer
 from typing import Any, Literal, ClassVar, Annotated
 
 PLAYER_FIELDS = {
@@ -32,6 +32,14 @@ HOST_FIELDS = {
 }
 
 NONEMPTYSTR = Annotated[str, StringConstraints(min_length=1)]
+
+# other_roles is a set (no duplicates) that leaves as a sorted list, so the
+# ARRAY column and API responses get a stable order. Requests only accept the
+# fixed choices; responses take whatever is stored so an old value can't 500.
+OtherRole = Literal["Coach", "Sponsor", "Team", "Viewer", "Venue", "Other"]
+_SORTED = PlainSerializer(sorted, return_type=list[str])
+OtherRolesIn = Annotated[set[OtherRole], _SORTED]
+OtherRolesOut = Annotated[set[str], _SORTED]
 
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 MIN_BIRTH_DATE = date(1900, 1, 1)
@@ -120,7 +128,7 @@ class RegistrationIn(BaseModel):
     discord: str | None = None
     instagram: str | None = None
     bracket_hosting: bool | None = None
-    other_roles: list[str] | None = None
+    other_roles: OtherRolesIn | None = None
     other_role_detail: str | None = None
     venues: list[dict] | None = None
     player: PlayerDetails | None = None
@@ -171,7 +179,7 @@ class Profile(BaseModel):
     is_player: bool
     is_host: bool
     bio: str | None = None
-    other_roles: list[str] | None = None
+    other_roles: OtherRolesOut | None = None
     other_role_detail: str | None = None
     games: list[str] | None = None
     organization: str | None = None
@@ -200,7 +208,7 @@ class ProfileSettingsOut(BaseModel):
     is_host: bool
     bio: str | None = None
     bracket_hosting: bool
-    other_roles: list[str] = []
+    other_roles: OtherRolesOut = set()
     other_role_detail: str | None = None
     profile_picture: str | None = None
 
@@ -276,7 +284,7 @@ class UserUpdate(Updater):
     discord: str | None = None
     instagram: str | None = None
     bracket_hosting: bool | None = None
-    other_roles: list[str] | None = None
+    other_roles: OtherRolesIn | None = None
     other_role_detail: str | None = None
     venues: list[VenueIn] | None = None
 

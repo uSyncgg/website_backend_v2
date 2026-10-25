@@ -117,7 +117,7 @@ def _build_user(payload: RegistrationIn, email: str, pfp_url: str, user_id: str)
         profile_picture = pfp_url if pfp_url != "" else None,
         bio = payload.bio,
         bracket_hosting = True if payload.bracket_hosting is None or payload.bracket_hosting is True else False,
-        other_roles = payload.other_roles,
+        other_roles = sorted(payload.other_roles) if payload.other_roles is not None else None,
         other_role_detail = payload.other_role_detail
     )
 
