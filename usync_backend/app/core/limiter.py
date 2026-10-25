@@ -9,6 +9,8 @@ STRICT_REGISTER = "5/hour"
 STRICT_USERNAME_CHECK = "30/minute"
 STRICT_FORM_SUBMISSION = "10/hour"
 STRICT_PAYMENT = "10/minute"
+STRICT_ACCOUNT_CHANGE = "10/hour"
+STRICT_ACCOUNT_DELETE = "5/hour"
 
 ### Moderate tier: authenticated actions and reads that expose individual records.
 MODERATE = "60/minute"

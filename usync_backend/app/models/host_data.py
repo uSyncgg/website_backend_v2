@@ -14,7 +14,7 @@ class EventFormParent(Base):
     __tablename__ = "events"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, unique = True, default = uuid.uuid4)
-    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), default = None)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete = "SET NULL"), index = True, default = None)
     event_type: Mapped[str] = mapped_column()
 
 class LanEvents(Base):

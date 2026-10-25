@@ -1,5 +1,6 @@
 import uuid
 
+from datetime import date
 from app.models.base import Base
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy import ForeignKey, String, Index, text, UniqueConstraint
@@ -46,12 +47,12 @@ class Players(Base):
     __tablename__ = "players"
     
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete = "CASCADE"), index = True)
     first_name: Mapped[str] = mapped_column()
     last_name: Mapped[str] = mapped_column()
     phone_number: Mapped[str | None] = mapped_column(nullable = True)
     gender: Mapped[str | None] = mapped_column(nullable = True)
-    date_of_birth: Mapped[str | None] = mapped_column(nullable = True)
+    date_of_birth: Mapped[date | None] = mapped_column(nullable = True)
     country: Mapped[str | None] = mapped_column(nullable = True)
     battlenet: Mapped[str | None] = mapped_column(unique = True, nullable = True)
     activision: Mapped[str | None] = mapped_column(unique = True, nullable = True)
@@ -69,7 +70,7 @@ class Hosts(Base):
     __tablename__ = "hosts"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete = "CASCADE"), index = True)
     games: Mapped[list[str]] = mapped_column(ARRAY(String), default = [], nullable = True)
     other_games: Mapped[str | None] = mapped_column(nullable = True)
     organization: Mapped[str] = mapped_column()
@@ -84,7 +85,7 @@ class Venues(Base):
 
     __tablename__ = "venues"
 
-    id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), primary_key = True, default = uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete = "CASCADE"), primary_key = True, default = uuid.uuid4)
     venue_name: Mapped[str] = mapped_column(primary_key = True)
     location: Mapped[str] = mapped_column()
 
@@ -116,7 +117,7 @@ class PlayerCompSiteAccounts(Base):
     __tablename__ = "player_comp_site_accounts"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, unique = True, default = uuid.uuid4)
-    player_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("players.id"))
+    player_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("players.id", ondelete = "CASCADE"))
     site_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("competitive_sites.id"))
     username: Mapped[str] = mapped_column()
 
@@ -132,7 +133,7 @@ class StatisticsParent(Base):
     __tablename__ = "statistics"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete = "CASCADE"), index = True)
     stat_type: Mapped[str] = mapped_column()
 
 class LanStatistics(Base):
@@ -143,7 +144,7 @@ class LanStatistics(Base):
     __tablename__ = "lan_statistics"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
-    stat_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("statistics.id"))
+    stat_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("statistics.id", ondelete = "CASCADE"), index = True)
     placing: Mapped[str | None] = mapped_column(nullable = True)
     event_name: Mapped[str | None] = mapped_column(nullable = True)
     proof: Mapped[str | None] = mapped_column(nullable = True)
@@ -157,7 +158,7 @@ class SiteStatistics(Base):
     __tablename__ = "site_statistics"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
-    stat_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("statistics.id"))
+    stat_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("statistics.id", ondelete = "CASCADE"), index = True)
     earnings: Mapped[str | None] = mapped_column(nullable = True)
     wins: Mapped[str | None] = mapped_column(nullable = True)
     losses: Mapped[str | None] = mapped_column(nullable = True)
@@ -172,7 +173,7 @@ class TournamentStatistics(Base):
     __tablename__ = "tournament_statistics"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
-    stat_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("statistics.id"))
+    stat_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("statistics.id", ondelete = "CASCADE"), index = True)
     site_url: Mapped[str | None] = mapped_column(nullable = True)
     elites: Mapped[int | None] = mapped_column(nullable = True)
     golds: Mapped[int | None] = mapped_column(nullable = True)
