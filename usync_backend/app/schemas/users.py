@@ -186,6 +186,7 @@ class Profile(BaseModel):
     host_games: list[str] | None = None
     event_types: list[str] | None = None
     venues: list[dict] | None = None
+    profile_picture: str | None = None
 
 class Me(BaseModel):
     """
