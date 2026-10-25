@@ -1,4 +1,7 @@
-from pydantic import BaseModel, model_validator, ConfigDict, StringConstraints, Field
+import re
+
+from datetime import date
+from pydantic import BaseModel, model_validator, ConfigDict, StringConstraints, Field, BeforeValidator, AfterValidator
 from typing import Any, Literal, ClassVar, Annotated
 
 PLAYER_FIELDS = {
@@ -30,6 +33,37 @@ HOST_FIELDS = {
 
 NONEMPTYSTR = Annotated[str, StringConstraints(min_length=1)]
 
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+MIN_BIRTH_DATE = date(1900, 1, 1)
+
+def _parse_birth_date(value: Any) -> Any:
+    """
+    Only accepts a YYYY-MM-DD string (what a browser date input sends) or a date. A blank
+    input means "not provided". Pydantic would otherwise also accept timestamps and the like.
+    """
+
+    if value is None or isinstance(value, date):
+        return value
+
+    if isinstance(value, str):
+        value = value.strip()
+
+        if value == "":
+            return None
+
+        if _ISO_DATE_RE.match(value):
+            return value
+
+    raise ValueError("Date of birth must be in YYYY-MM-DD format.")
+
+def _check_birth_date_range(value: date | None) -> date | None:
+    if value is not None and not (MIN_BIRTH_DATE <= value <= date.today()):
+        raise ValueError("Enter a real date of birth.")
+
+    return value
+
+BirthDate = Annotated[date | None, BeforeValidator(_parse_birth_date), AfterValidator(_check_birth_date_range)]
+
 class PlayerDetails(BaseModel):
     """
     
@@ -39,7 +73,7 @@ class PlayerDetails(BaseModel):
     last_name: str
     phone_number: str | None = None
     gender: str | None = None
-    date_of_birth: str | None = None
+    date_of_birth: BirthDate = None
     country: str | None = None
     interests: list[str] | None = None
     other_games: str | None = None
@@ -176,7 +210,7 @@ class ProfileSettingsOut(BaseModel):
     last_name: str | None = None
     phone_number: str | None = None
     gender: str | None = None
-    date_of_birth: str | None = None
+    date_of_birth: date | None = None
     country: str | None = None
 
     organization: str | None = None
@@ -214,13 +248,24 @@ class Updater(BaseModel):
 
         return data
 
+class VenueIn(BaseModel):
+    """
+    One venue entry. Venues are replaced as a whole set on update.
+    """
+
+    model_config = ConfigDict(extra = "forbid", str_strip_whitespace=True)
+
+    name: NONEMPTYSTR
+    location: NONEMPTYSTR
+
 class UserUpdate(Updater):
     """
     
     """
 
     never_null: ClassVar[set[str]] = {
-        "bracket_hosting"
+        "bracket_hosting",
+        "venues"
     }
 
     bio: str | None = None
@@ -233,6 +278,7 @@ class UserUpdate(Updater):
     bracket_hosting: bool | None = None
     other_roles: list[str] | None = None
     other_role_detail: str | None = None
+    venues: list[VenueIn] | None = None
 
 class PlayerUpdate(Updater):
     """
@@ -245,18 +291,14 @@ class PlayerUpdate(Updater):
         "activision",
         "battlenet",
         "steam",
-        "riot",
-        "cmg",
-        "gankster",
-        "faceit",
-        "battlefly"
+        "riot"
     }
 
     first_name: NONEMPTYSTR | None = None
     last_name: NONEMPTYSTR | None = None
     phone_number: str | None = None
     gender: str | None = None
-    date_of_birth: str | None = None
+    date_of_birth: BirthDate = None
     country: str | None = None
     interests: list[str] | None = Field(default=None, serialization_alias="games")
     other_games: str | None = None
@@ -264,10 +306,6 @@ class PlayerUpdate(Updater):
     activision: str | None = None
     steam: str | None = None
     riot: str | None = None
-    cmg: str | None = None
-    gankster: str | None = None
-    faceit: str | None = None
-    battlefly: str | None = None
 
 class HostUpdate(Updater):
     """
@@ -284,6 +322,15 @@ class HostUpdate(Updater):
     organization: NONEMPTYSTR | None = None
     host_country: NONEMPTYSTR | None = None
     event_types: list[str] | None = None
+
+class UsernameUpdate(BaseModel):
+    """
+    Validation class for payload information for the /me/username endpoint.
+    """
+
+    model_config = ConfigDict(extra = "forbid")
+
+    username: str
 
 class UpdateProfileIn(BaseModel):
     """

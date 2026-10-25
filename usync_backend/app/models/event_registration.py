@@ -18,7 +18,7 @@ class EventPassTiers(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("events.id"))
-    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), default=None)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True, default=None)
     host_email: Mapped[str | None] = mapped_column(nullable = True, default = "contact@usync.gg", server_default = text("'contact@usync.gg'"))
     tier_name: Mapped[str] = mapped_column()          
     price_cents: Mapped[int] = mapped_column()
@@ -42,7 +42,7 @@ class EventRegistrations(Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, unique=True, default=uuid.uuid4)
     event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("events.id"))
     pass_tier_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("event_pass_tiers.id"))
-    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), default=None)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, default=None)
     team_name: Mapped[str | None] = mapped_column(nullable=True, default=None)              
     team_name_normalized: Mapped[str | None] = mapped_column(nullable=True, default=None)   
     contact_username: Mapped[str | None] = mapped_column()     
