@@ -43,7 +43,7 @@ The app and Alembic use **different** connection strings and drivers:
 - Runtime (`app/core/db.py`) uses `ASYNC_SUPABASE_CONNECTION_URL` with the **asyncpg** driver.
 - Alembic (`alembic/env.py`) uses `SUPABASE_CONNECTION_URL` with the synchronous **psycopg2** driver.
 
-The runtime URL points at Supabase's **transaction-mode** pooler (port `6543`); Alembic stays on session mode (port `5432`). In transaction mode each transaction can land on a different server connection, so the async engine sets `statement_cache_size=0` and a unique `prepared_statement_name_func` — both are required and should not be removed. Pool size is kept small (`pool_size=5`, `max_overflow=5`) because every process shares the pooler's client limit.
+The runtime URL points at Supabase's **transaction-mode** pooler (port `6543`); Alembic stays on session mode (port `5432`). In transaction mode each transaction can land on a different server connection, so the async engine sets `statement_cache_size=0` (asyncpg), `prepared_statement_cache_size=0` (SQLAlchemy's own cache) and a unique `prepared_statement_name_func` — all three are required and should not be removed. Pool size is kept small (`pool_size=5`, `max_overflow=5`) because every process shares the pooler's client limit.
 
 ## Architecture
 

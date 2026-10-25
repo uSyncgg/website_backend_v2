@@ -423,7 +423,8 @@ def _build_profile(user: UsersParent, player: Players | None, host: Hosts | None
         is_host = user.is_host,
         bio = user.bio,
         other_roles = user.other_roles,
-        other_role_detail = user.other_role_detail
+        other_role_detail = user.other_role_detail,
+        profile_picture = user.profile_picture
     )
 
     if player:
