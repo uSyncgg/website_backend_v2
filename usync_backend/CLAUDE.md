@@ -43,7 +43,7 @@ The app and Alembic use **different** connection strings and drivers:
 - Runtime (`app/core/db.py`) uses `ASYNC_SUPABASE_CONNECTION_URL` with the **asyncpg** driver.
 - Alembic (`alembic/env.py`) uses `SUPABASE_CONNECTION_URL` with the synchronous **psycopg2** driver.
 
-The async engine sets `statement_cache_size=0` — this is required to work through Supabase's connection pooler (pgbouncer) and should not be removed.
+The runtime URL points at Supabase's **transaction-mode** pooler (port `6543`); Alembic stays on session mode (port `5432`). In transaction mode each transaction can land on a different server connection, so the async engine sets `statement_cache_size=0` (asyncpg), `prepared_statement_cache_size=0` (SQLAlchemy's own cache) and a unique `prepared_statement_name_func` — all three are required and should not be removed. Pool size is kept small (`pool_size=5`, `max_overflow=5`) because every process shares the pooler's client limit.
 
 ## Architecture
 
@@ -62,6 +62,10 @@ Request flow is layered: **router → service → model**, with **schema** (Pyda
 - Stripe: inject `stripeClient: StripeClient = Depends(get_stripe_client)` — never construct a Stripe client inside a handler; it lives on `app.state`.
 - Supabase (Storage and other HTTP APIs): inject `supabase: AsyncClient = Depends(get_supabase)`. It is built once in `lifespan` from `SUPABASE_URL` + `SUPABASE_SECRET_KEY` and lives on `app.state`. This is separate from `get_db` — the DB session talks to Postgres, the client talks to Supabase's HTTP APIs.
 - Auth: protect a route with `claims: dict = Depends(verify_supabase_jwt)` (expects `Authorization: Bearer <supabase access token>`). Take the user's identity from `claims["sub"]` / `claims["email"]`, never from the request body.
+
+### Rate limiting
+
+`app/core/limiter.py` holds the slowapi `limiter` and the tier constants (`STRICT_*`, `MODERATE`, `LOOSE`). Every route gets `LOOSE` by default through `SlowAPIASGIMiddleware`, so plain public reads need no changes. To give a route a stricter tier, add `@limiter.limit(<TIER>)` **below** the `@router` decorator, and the handler **must** take `request: Request` and `response: Response` (slowapi finds them by name and writes the `X-RateLimit-*` / `Retry-After` headers onto `response`). Mark health checks, webhooks, and token-guarded invalidation routes `@limiter.exempt`. Requests are keyed by user id when `verify_supabase_jwt` ran (it sets `request.state.user_id`), otherwise by client IP. Storage is in-memory, so limits are per process — switch `storage_uri` to Redis before running multiple workers/instances.
 
 ### Profile picture uploads
 

@@ -13,6 +13,7 @@ from supabase import AsyncClient
 from openai import AsyncOpenAI
 
 bearer_scheme = HTTPBearer()
+optional_bearer_scheme = HTTPBearer(auto_error = False)
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """
@@ -75,15 +76,37 @@ def verify_supabase_jwt(request: Request, creds: HTTPAuthorizationCredentials = 
     try:
         signing_key = request.app.state.jwk_client.get_signing_key_from_jwt(creds.credentials)
 
-        return jwt.decode(
+        claims = jwt.decode(
             creds.credentials,
             signing_key.key,
             algorithms = ["ES256"],
             audience = "authenticated"
         )
 
+        request.state.user_id = claims["sub"]
+
+        return claims
+
     except jwt.PyJWTError:
         raise HTTPException(status_code = 401, detail = "Invalid or expired token")
+
+def optional_supabase_jwt(request: Request, creds: HTTPAuthorizationCredentials | None = Depends(optional_bearer_scheme)) -> dict | None:
+    """
+    Soft version of verify_supabase_jwt for public routes that show more to signed-in users.
+
+    ::param request the Request object to access the JWK client
+    ::param creds the bearer credentials, or None when no Authorization header was sent
+
+    ::return the token claims, or None if the token is missing, invalid or expired (treated as anonymous rather than a 401)
+    """
+
+    if creds is None:
+        return None
+
+    try:
+        return verify_supabase_jwt(request, creds)
+    except HTTPException:
+        return None
 
 def get_supabase(request: Request) -> AsyncClient:
     """

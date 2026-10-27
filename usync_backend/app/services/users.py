@@ -5,17 +5,26 @@ import base64
 import unicodedata
 import re
 
-from sqlalchemy import select, insert, update, Sequence
+from sqlalchemy import select, insert, update, delete, Sequence
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.exc import IntegrityError
 from datetime import datetime, timezone
-from app.schemas.users import RegistrationIn, RegistrationOut, PlayerDetails, HostDetails, Profile
+from app.schemas.users import (
+    RegistrationIn, 
+    RegistrationOut, 
+    PlayerDetails, 
+    HostDetails, 
+    Profile, 
+    Me, 
+    ProfileSettingsOut
+)
 from app.models.users import Players, Hosts, UsersParent, PlayerCompSiteAccounts, Venues
 from PIL import Image, ImageOps, UnidentifiedImageError
 from supabase import AsyncClient
 from storage3.utils import StorageException
+from supabase_auth.errors import AuthApiError
 from openai import AsyncOpenAI
 from better_profanity import profanity
 
@@ -107,8 +116,8 @@ def _build_user(payload: RegistrationIn, email: str, pfp_url: str, user_id: str)
         instagram = payload.instagram,
         profile_picture = pfp_url if pfp_url != "" else None,
         bio = payload.bio,
-        bracket_hosting = True if payload.bracket_hosting is None or payload.bracket_hosting == "yes" else False,
-        other_roles = payload.other_roles,
+        bracket_hosting = True if payload.bracket_hosting is None or payload.bracket_hosting is True else False,
+        other_roles = sorted(payload.other_roles) if payload.other_roles is not None else None,
         other_role_detail = payload.other_role_detail
     )
 
@@ -333,7 +342,10 @@ async def process_pfp(file: UploadFile, supabase: AsyncClient, user_id: str, ope
     except (ValueError, UnidentifiedImageError, Image.DecompressionBombError, OSError):
         raise HTTPException(422, "Invalid image")
 
-    await moderate_pfp(pfp, openai)
+    try:
+        await moderate_pfp(pfp, openai)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
     pfp_url, pfp_path = await deposit_pfp(pfp, supabase, user_id)
 
@@ -345,7 +357,8 @@ async def check_valid_username(
         openai: AsyncOpenAI, 
         loc: tuple[str, str], 
         player: bool | None = None, 
-        host: bool | None = None
+        host: bool | None = None,
+        exclude_user_id: str | None = None
     ) -> None:
     """
     
@@ -368,21 +381,35 @@ async def check_valid_username(
         .where(UsersParent.canonical_username == canonical_username)
     )
 
+    if exclude_user_id:
+        stmt = stmt.where(UsersParent.id != exclude_user_id)
+
+    # A name can belong to one player account and a different host account, so check every match.
     result = await db.execute(stmt)
-    user = result.scalars().first()
 
-    if not user:
-        return None
-
-    if player:
+    for user in result.scalars().all():
         if player is True and user.is_player is True:
             raise HTTPException(status_code = 409, detail="Username is taken.")
 
-    if host:
         if host is True and user.is_host is True:
             raise HTTPException(status_code = 409, detail="Username is taken.")
 
     return None
+
+def _build_venues(venues: list[Venues]) -> list[dict]:
+    """
+    
+    """
+
+    venue_list = []
+
+    if len(venues) == 0:
+        return venue_list
+
+    for venue in venues:
+        venue_list.append({"name": venue.venue_name, "location": venue.location})
+
+    return venue_list
 
 def _build_profile(user: UsersParent, player: Players | None, host: Hosts | None, venues: list[Venues]) -> Profile:
     """
@@ -396,24 +423,26 @@ def _build_profile(user: UsersParent, player: Players | None, host: Hosts | None
         is_host = user.is_host,
         bio = user.bio,
         other_roles = user.other_roles,
-        other_role_detail = user.other_role_detail
+        other_role_detail = user.other_role_detail,
+        profile_picture = user.profile_picture
     )
 
     if player:
+        if "Other" in player.games:
+            player.games.pop(player.games.index("Other"))
+
         profile.games = player.games
 
     if host:
+        if "Other" in host.games:
+            host.games.pop(host.games.index("Other"))
+
         profile.host_games = host.games
         profile.organization = host.organization
         profile.event_types = host.event_types
 
     if len(venues) > 0:
-        venue_list = []
-
-        for venue in venues:
-            venue_list.append({"name": venue.venue_name, "location": venue.location})
-
-        profile.venues = venue_list
+        profile.venues = _build_venues(venues)
 
     return profile
 
@@ -464,4 +493,249 @@ async def get_profile(username: str, db: AsyncSession) -> Profile:
 
     return _build_profile(user, player, host, venues)
 
+async def get_me(user_id: str, db: AsyncSession) -> Me:
+    """
+    Fetches the signed in user's navbar details. A 404 means the user has signed up
+    through Supabase but has not completed their profile yet.
+    """
+
+    result = await db.execute(select(UsersParent).where(UsersParent.id == user_id))
+    user = result.scalars().first()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="Profile not completed.")
+
+    return Me(username=user.username, profile_picture=user.profile_picture)
+
+async def get_profile_settings(user_id: str, db: AsyncSession) -> ProfileSettingsOut:
+    """
     
+    """
+
+    user_result = await db.execute(select(UsersParent).where(UsersParent.id == user_id))
+    user = user_result.scalars().first()
+
+    player = None
+    host = None
+
+    if not user:
+        raise HTTPException(status_code=404, detail="Profile not found.")
+
+    settings = ProfileSettingsOut(
+        username = user.username,
+        verified = user.verified,
+        is_player = user.is_player,
+        is_host = user.is_host,
+        bio = user.bio,
+        bracket_hosting = user.bracket_hosting,
+        other_roles = user.other_roles if user.other_roles else [],
+        other_role_detail = user.other_role_detail,
+        profile_picture = user.profile_picture
+    )
+
+    if user.is_player:
+        player_result = await db.execute(select(Players).where(Players.id == user_id))
+        player = player_result.scalars().first()
+
+    if user.is_host:
+        host_result = await db.execute(select(Hosts).where(Hosts.id == user_id))
+        host = host_result.scalars().first()
+
+    if player:
+        settings.interests = player.games if player.games else []
+        settings.other_games = player.other_games
+        settings.first_name = player.first_name
+        settings.last_name = player.last_name
+        settings.phone_number = player.phone_number
+        settings.gender = player.gender
+        settings.date_of_birth = player.date_of_birth
+        settings.country = player.country
+
+    if host:
+        settings.organization = host.organization
+        settings.hosted_games = host.games if host.games else []
+        settings.other_hosted_games = host.other_games
+        settings.host_country = host.host_country
+        settings.event_types = host.event_types if host.event_types else []
+
+    venue_result = await db.execute(select(Venues).where(Venues.id == user_id))
+    venues = venue_result.scalars().all()
+
+    settings.venues = _build_venues(venues)
+
+    return settings
+
+async def _get_user(user_id: str, db: AsyncSession) -> UsersParent:
+    """
+    Loads the signed in user's users row, or raises a 404 if their profile doesn't exist.
+    """
+
+    result = await db.execute(select(UsersParent).where(UsersParent.id == user_id))
+    user = result.scalars().first()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="Profile not found.")
+
+    return user
+
+async def update_profile_section(
+    user_id: str, 
+    table: type[UsersParent] | type[Players] | type[Hosts], 
+    payload: dict,
+    db: AsyncSession
+) -> ProfileSettingsOut:
+    """
+    Applies a partial update to one of the user's tables (users, players or hosts). Venues
+    ride along on the users update and are replaced as a whole set in the same transaction.
+    A 404 means the row doesn't exist, e.g. a player-only user updating host details.
+    """
+
+    venues = payload.pop("venues", None)
+
+    if payload:
+        result = await db.execute(
+            update(table).where(table.id == user_id).values(**payload).returning(table.id)
+        )
+
+        if result.scalar_one_or_none() is None:
+            await db.rollback()
+            raise HTTPException(status_code=404, detail="Profile not found.")
+    elif venues is not None:
+        await _get_user(user_id, db)
+
+    if venues is not None:
+        # Keyed by name since (id, venue_name) is the primary key.
+        unique_venues = {v["name"]: v["location"] for v in venues}
+
+        await db.execute(delete(Venues).where(Venues.id == user_id))
+
+        if unique_venues:
+            await db.execute(
+                insert(Venues),
+                [{"id": user_id, "venue_name": name, "location": location} for name, location in unique_venues.items()]
+            )
+
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        logger.exception("Profile update failed with unexpected integrity error.")
+        raise HTTPException(status_code=409, detail="Update conflicts with existing data.")
+
+    return await get_profile_settings(user_id, db)
+
+def _storage_path(pfp_url: str) -> str | None:
+    """
+    Turns a profile_pictures public URL back into its storage path (<user_id>/<uuid>.webp).
+    """
+
+    marker = "/profile_pictures/"
+
+    if marker not in pfp_url:
+        return None
+
+    return pfp_url.split(marker, 1)[1].split("?", 1)[0]
+
+async def update_profile_picture(
+    user_id: str,
+    file: UploadFile,
+    db: AsyncSession,
+    supabase: AsyncClient,
+    openai: AsyncOpenAI
+) -> Me:
+    """
+    Replaces the user's profile picture. The new file is saved before the old one is removed,
+    so a failure part way through never leaves the user without a picture.
+    """
+
+    user = await _get_user(user_id, db)
+    old_url = user.profile_picture
+
+    pfp_url, pfp_path = await process_pfp(file, supabase, user_id, openai)
+    user.profile_picture = pfp_url
+
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        try:
+            await supabase.storage.from_("profile_pictures").remove([pfp_path])
+        except Exception:
+            logger.exception("Failed to clean up profile picture %s", pfp_path)
+        raise
+
+    old_path = _storage_path(old_url) if old_url else None
+
+    if old_path and old_path != pfp_path:
+        try:
+            await supabase.storage.from_("profile_pictures").remove([old_path])
+        except Exception:
+            logger.exception("Failed to remove old profile picture %s", old_path)
+
+    return Me(username=user.username, profile_picture=user.profile_picture)
+
+async def change_username(user_id: str, username: str, db: AsyncSession, openai: AsyncOpenAI) -> Me:
+    """
+    Changes the signed in user's username. The same moderation and availability rules as
+    sign up apply, checked against the user's own player/host roles, ignoring their own row
+    so a casing-only change is allowed.
+    """
+
+    user = await _get_user(user_id, db)
+
+    await check_valid_username(
+        username,
+        db,
+        openai,
+        ("body", "username"),
+        user.is_player,
+        user.is_host,
+        exclude_user_id = user_id
+    )
+
+    user.username = username.strip()
+    user.canonical_username = _canonical_username(username)
+
+    try:
+        await db.commit()
+    except IntegrityError as e:
+        await db.rollback()
+        if "ix_users_username_player_unique" in str(e.orig) or "ix_users_username_host_unique" in str(e.orig):
+            raise HTTPException(status_code=409, detail="Username is taken.")
+        logger.exception("Username change failed with unexpected integrity error.")
+        raise HTTPException(status_code=409, detail="Username change conflicts with existing data.")
+
+    return Me(username=user.username, profile_picture=user.profile_picture)
+
+async def delete_account(user_id: str, db: AsyncSession, supabase: AsyncClient) -> None:
+    """
+    Deletes the user's app data, then their Supabase auth user, then their stored files.
+    The FK rules on users.id cascade to the user's own rows and null out shared event data.
+    App data goes first so a failure never leaves a public profile nobody can log into.
+    Every step is safe to retry: a missing users row just deletes nothing.
+    """
+
+    await db.execute(delete(UsersParent).where(UsersParent.id == user_id))
+    await db.commit()
+
+    try:
+        await supabase.auth.admin.delete_user(user_id)
+    except AuthApiError as e:
+        # 404 means an earlier attempt already removed the auth user.
+        if e.status != 404:
+            logger.exception("Failed to delete auth user %s", user_id)
+            raise HTTPException(status_code=500, detail="Could not finish deleting your account. Please try again.")
+    except Exception:
+        logger.exception("Failed to delete auth user %s", user_id)
+        raise HTTPException(status_code=500, detail="Could not finish deleting your account. Please try again.")
+
+    try:
+        files = await supabase.storage.from_("profile_pictures").list(user_id)
+        paths = [f"{user_id}/{f['name']}" for f in files]
+
+        if paths:
+            await supabase.storage.from_("profile_pictures").remove(paths)
+    except Exception:
+        logger.exception("Failed to remove stored files for deleted user %s", user_id)
+
+    return None

@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.db import engine, AsyncSessionLocal
 from app.core.middleware import add_process_time
+from app.core.limiter import limiter, rate_limit_exceeded_handler
 from contextlib import asynccontextmanager
 from stripe import StripeClient
 from dotenv import load_dotenv
@@ -12,6 +13,8 @@ from cachetools import TTLCache
 from jwt import PyJWKClient
 from supabase import acreate_client
 from openai import AsyncOpenAI
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIASGIMiddleware
 
 from app.routers import tournaments
 from app.routers import healthcheck
@@ -58,6 +61,10 @@ async def lifespan(app: FastAPI):
     await engine.dispose()
 
 app = FastAPI(lifespan=lifespan)
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIASGIMiddleware)
 
 app.middleware("http")(add_process_time)
 
