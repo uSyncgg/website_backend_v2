@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, File, Form, UploadFile, HTTPException, R
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.dependencies import get_db, verify_supabase_jwt, get_supabase, get_openai
 from app.core.limiter import limiter, STRICT_REGISTER, STRICT_USERNAME_CHECK, STRICT_ACCOUNT_CHANGE, STRICT_ACCOUNT_DELETE, MODERATE
-from app.schemas.users import RegistrationIn, RegistrationOut, Profile, Me, ProfileSettingsOut, UserUpdate, PlayerUpdate, HostUpdate, UsernameUpdate
+from app.schemas.users import RegistrationIn, RegistrationOut, Profile, Me, ProfileSettingsOut, UserUpdate, PlayerUpdate, HostUpdate, UsernameUpdate, BecomeHostIn
 from app.services.users import (
     handle_registration, 
     process_pfp, 
@@ -13,6 +13,7 @@ from app.services.users import (
     update_profile_section,
     update_profile_picture,
     change_username,
+    add_host_role,
     delete_account
 )
 from app.models.users import UsersParent, Players, Hosts
@@ -155,6 +156,23 @@ async def updateHost(
     payload = host.model_dump(exclude_unset=True, by_alias=True)
 
     return await update_profile_section(claims["sub"], Hosts, payload, db)
+
+@router.post("/me/host", response_model = ProfileSettingsOut)
+@limiter.limit(STRICT_ACCOUNT_CHANGE)
+async def becomeHost(
+    request: Request,
+    response: Response,
+    payload: BecomeHostIn,
+    db: AsyncSession = Depends(get_db),
+    claims: dict = Depends(verify_supabase_jwt),
+    openai: AsyncOpenAI = Depends(get_openai)
+):
+    """
+    Adds the host role to the signed in user's account: creates their hosts row from the
+    host details and sets is_host. 409 if they're already a host or the username is taken.
+    """
+
+    return await add_host_role(claims["sub"], payload, db, openai)
 
 @router.put("/me/profile-picture", response_model = Me)
 @limiter.limit(STRICT_ACCOUNT_CHANGE)

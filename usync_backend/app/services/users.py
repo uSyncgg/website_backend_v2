@@ -18,7 +18,9 @@ from app.schemas.users import (
     HostDetails, 
     Profile, 
     Me, 
-    ProfileSettingsOut
+    ProfileSettingsOut,
+    BecomeHostIn,
+    HostRoleDetails
 )
 from app.models.users import Players, Hosts, UsersParent, PlayerCompSiteAccounts, Venues
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -62,7 +64,7 @@ def _build_player(player_data: PlayerDetails, user_id: str) -> Players:
         riot = player_data.riot
     )
 
-def _build_host(host_data: HostDetails, user_id: str) -> Hosts:
+def _build_host(host_data: HostDetails | HostRoleDetails, user_id: str) -> Hosts:
     """
     
     """
@@ -706,6 +708,46 @@ async def change_username(user_id: str, username: str, db: AsyncSession, openai:
         raise HTTPException(status_code=409, detail="Username change conflicts with existing data.")
 
     return Me(username=user.username, profile_picture=user.profile_picture)
+
+async def add_host_role(user_id: str, payload: BecomeHostIn, db: AsyncSession, openai: AsyncOpenAI) -> ProfileSettingsOut:
+    """
+    Makes the signed in user a host as well (e.g. a player who starts running events).
+    The username they host under gets the same moderation and availability rules as sign
+    up - checked against hosts, and against players too if they're a player - then their
+    hosts row is created and is_host is set in one transaction. A 409 means they're already
+    a host or the username is taken.
+    """
+
+    user = await _get_user(user_id, db)
+
+    if user.is_host:
+        raise HTTPException(status_code=409, detail="You're already a host.")
+
+    await check_valid_username(
+        payload.username,
+        db,
+        openai,
+        ("body", "username"),
+        user.is_player,
+        True,
+        exclude_user_id = user_id
+    )
+
+    user.username = payload.username.strip()
+    user.canonical_username = _canonical_username(payload.username)
+    user.is_host = True
+    db.add(_build_host(payload.host, user_id))
+
+    try:
+        await db.commit()
+    except IntegrityError as e:
+        await db.rollback()
+        if "ix_users_username_player_unique" in str(e.orig) or "ix_users_username_host_unique" in str(e.orig):
+            raise HTTPException(status_code=409, detail="Username is taken.")
+        logger.exception("Adding the host role failed with unexpected integrity error.")
+        raise HTTPException(status_code=409, detail="Becoming a host conflicts with existing data.")
+
+    return await get_profile_settings(user_id, db)
 
 async def delete_account(user_id: str, db: AsyncSession, supabase: AsyncClient) -> None:
     """

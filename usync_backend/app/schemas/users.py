@@ -341,6 +341,31 @@ class UsernameUpdate(BaseModel):
 
     username: str
 
+class HostRoleDetails(BaseModel):
+    """
+    The host details asked for when an existing account becomes a host. Same fields as
+    sign up's HostDetails, but organization and host_country can't be blank.
+    """
+
+    model_config = ConfigDict(extra = "forbid", str_strip_whitespace=True)
+
+    hosted_games: list[str] | None = None
+    other_hosted_games: str | None = None
+    organization: NONEMPTYSTR
+    host_country: NONEMPTYSTR
+    event_types: list[str] | None = None
+
+class BecomeHostIn(BaseModel):
+    """
+    Validation class for payload information for the POST /me/host endpoint. `username` is
+    the name to host under: the account's current one, or a new one that replaces it.
+    """
+
+    model_config = ConfigDict(extra = "forbid")
+
+    username: str
+    host: HostRoleDetails
+
 class UpdateProfileIn(BaseModel):
     """
     Validation class for payload information for the /profile/update endpoint.
