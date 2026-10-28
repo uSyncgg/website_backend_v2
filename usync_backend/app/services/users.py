@@ -20,7 +20,9 @@ from app.schemas.users import (
     Me, 
     ProfileSettingsOut,
     BecomeHostIn,
-    HostRoleDetails
+    HostRoleDetails,
+    BecomePlayerIn,
+    PlayerRoleDetails
 )
 from app.models.users import Players, Hosts, UsersParent, PlayerCompSiteAccounts, Venues
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -42,7 +44,7 @@ _SPLIT_RE = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Za-z])(?=\d)|(?<=\d)(?=[A-Za
 
 profanity.load_censor_words()
 
-def _build_player(player_data: PlayerDetails, user_id: str) -> Players:
+def _build_player(player_data: PlayerDetails | PlayerRoleDetails, user_id: str) -> Players:
     """
     
     """
@@ -709,34 +711,43 @@ async def change_username(user_id: str, username: str, db: AsyncSession, openai:
 
     return Me(username=user.username, profile_picture=user.profile_picture)
 
-async def add_host_role(user_id: str, payload: BecomeHostIn, db: AsyncSession, openai: AsyncOpenAI) -> ProfileSettingsOut:
+async def _add_role(
+    user_id: str,
+    role: str,
+    username: str,
+    build_row,
+    db: AsyncSession,
+    openai: AsyncOpenAI
+) -> ProfileSettingsOut:
     """
-    Makes the signed in user a host as well (e.g. a player who starts running events).
-    The username they host under gets the same moderation and availability rules as sign
-    up - checked against hosts, and against players too if they're a player - then their
-    hosts row is created and is_host is set in one transaction. A 409 means they're already
-    a host or the username is taken.
+    Adds the player or host role to the signed in user's account. The username they'll use
+    gets the same moderation and availability rules as sign up - checked against every role
+    the account will have, ignoring their own row so keeping their current name works - then
+    the role's row is created and its is_<role> flag set in one transaction. An account has
+    one username, so a new name replaces it everywhere. A 409 means they already have the
+    role or the username is taken.
     """
 
     user = await _get_user(user_id, db)
+    flag = f"is_{role}"
 
-    if user.is_host:
-        raise HTTPException(status_code=409, detail="You're already a host.")
+    if getattr(user, flag):
+        raise HTTPException(status_code=409, detail=f"You're already a {role}.")
 
     await check_valid_username(
-        payload.username,
+        username,
         db,
         openai,
         ("body", "username"),
-        user.is_player,
-        True,
+        True if role == "player" else user.is_player,
+        True if role == "host" else user.is_host,
         exclude_user_id = user_id
     )
 
-    user.username = payload.username.strip()
-    user.canonical_username = _canonical_username(payload.username)
-    user.is_host = True
-    db.add(_build_host(payload.host, user_id))
+    user.username = username.strip()
+    user.canonical_username = _canonical_username(username)
+    setattr(user, flag, True)
+    db.add(build_row(user_id))
 
     try:
         await db.commit()
@@ -744,10 +755,24 @@ async def add_host_role(user_id: str, payload: BecomeHostIn, db: AsyncSession, o
         await db.rollback()
         if "ix_users_username_player_unique" in str(e.orig) or "ix_users_username_host_unique" in str(e.orig):
             raise HTTPException(status_code=409, detail="Username is taken.")
-        logger.exception("Adding the host role failed with unexpected integrity error.")
-        raise HTTPException(status_code=409, detail="Becoming a host conflicts with existing data.")
+        logger.exception("Adding the %s role failed with unexpected integrity error.", role)
+        raise HTTPException(status_code=409, detail=f"Becoming a {role} conflicts with existing data.")
 
     return await get_profile_settings(user_id, db)
+
+async def add_host_role(user_id: str, payload: BecomeHostIn, db: AsyncSession, openai: AsyncOpenAI) -> ProfileSettingsOut:
+    """
+    Makes the signed in user a host as well (e.g. a player who starts running events).
+    """
+
+    return await _add_role(user_id, "host", payload.username, lambda uid: _build_host(payload.host, uid), db, openai)
+
+async def add_player_role(user_id: str, payload: BecomePlayerIn, db: AsyncSession, openai: AsyncOpenAI) -> ProfileSettingsOut:
+    """
+    Makes the signed in user a player as well (e.g. a host or venue who also competes).
+    """
+
+    return await _add_role(user_id, "player", payload.username, lambda uid: _build_player(payload.player, uid), db, openai)
 
 async def delete_account(user_id: str, db: AsyncSession, supabase: AsyncClient) -> None:
     """

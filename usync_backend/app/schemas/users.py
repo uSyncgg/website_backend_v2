@@ -366,6 +366,28 @@ class BecomeHostIn(BaseModel):
     username: str
     host: HostRoleDetails
 
+class PlayerRoleDetails(PlayerDetails):
+    """
+    The player details asked for when an existing account becomes a player. Same fields as
+    sign up's PlayerDetails, but first and last name can't be blank.
+    """
+
+    model_config = ConfigDict(extra = "forbid", str_strip_whitespace=True)
+
+    first_name: NONEMPTYSTR
+    last_name: NONEMPTYSTR
+
+class BecomePlayerIn(BaseModel):
+    """
+    Validation class for payload information for the POST /me/player endpoint. `username` is
+    the name to play under: the account's current one, or a new one that replaces it.
+    """
+
+    model_config = ConfigDict(extra = "forbid")
+
+    username: str
+    player: PlayerRoleDetails
+
 class UpdateProfileIn(BaseModel):
     """
     Validation class for payload information for the /profile/update endpoint.
