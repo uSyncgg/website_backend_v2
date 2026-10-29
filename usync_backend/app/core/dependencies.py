@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from stripe import StripeClient
 from fastapi import Request, Header, HTTPException, status, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from sqlalchemy import text
 from .db import AsyncSessionLocal
 from cachetools import TTLCache
 from supabase import AsyncClient
@@ -22,6 +23,19 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
     async with AsyncSessionLocal() as session:
         yield session
+
+async def get_readonly_db() -> AsyncGenerator[AsyncSession, None]:
+    """
+    Session for admin reads. The transaction is marked READ ONLY, so Postgres rejects any
+    INSERT/UPDATE/DELETE run through it, and it is always rolled back.
+    """
+
+    async with AsyncSessionLocal() as session:
+        await session.execute(text("SET TRANSACTION READ ONLY"))
+        try:
+            yield session
+        finally:
+            await session.rollback()
 
 def get_stripe_client(request: Request) -> StripeClient:
     """
@@ -122,3 +136,25 @@ def get_openai(request: Request) -> AsyncOpenAI:
     """
 
     return request.app.state.openai
+
+def admin_emails() -> set[str]:
+    """
+    ::return the lowercased emails listed in the ADMIN_EMAILS env var (comma separated); empty means no admins
+    """
+
+    return {e.strip().lower() for e in os.getenv("ADMIN_EMAILS", "").split(",") if e.strip()}
+
+def require_admin(claims: dict = Depends(verify_supabase_jwt)) -> dict:
+    """
+    Allow only signed-in accounts whose email is in ADMIN_EMAILS. Everyone else gets a 403.
+
+    ::param claims the verified Supabase token claims
+
+    ::return the token claims
+    """
+
+    email = (claims.get("email") or "").lower()
+    if not email or email not in admin_emails():
+        raise HTTPException(status_code = status.HTTP_403_FORBIDDEN, detail = "Admins only")
+
+    return claims
