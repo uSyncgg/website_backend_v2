@@ -1,7 +1,7 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.host_data import LanEvents, LeagueEvents, WagerEvents, XpEvents, LeagueParentEvents
-from app.schemas.events import LeagueParentsOut, LeaguesOut, LansOut, WagersOut, XpsOut
+from app.schemas.events import LeagueParentsOut
 from collections.abc import Sequence
 from collections import defaultdict
 from fastapi import HTTPException
@@ -36,60 +36,6 @@ type EventUnion = (
     WagerEvents |
     XpEvents
 )
-
-OUT_SCHEMA_LOOKUP = {
-    LeagueEvents: LeaguesOut,
-    LanEvents: LansOut,
-    WagerEvents: WagersOut,
-    XpEvents: XpsOut
-}
-
-def _redact_event(event):
-    """
-    Return a copy of a single event with its details emptied.
-
-    The ORM rows can be shared (the verified caches hold them across requests), so this
-    never mutates them - it builds the response schema and redacts that copy instead.
-    League parents carry no details of their own, only their nested leagues.
-
-    ::param event an ORM event row or an already-built response schema
-
-    ::return the redacted copy, or the event unchanged if it has no details
-    """
-
-    if isinstance(event, LeagueParentsOut):
-        return event.model_copy(update = {"leagues": [_redact_event(league) for league in event.leagues]})
-
-    if isinstance(event, LeaguesOut | LansOut | WagersOut | XpsOut):
-        return event.model_copy(update = {"details": []})
-
-    schema = OUT_SCHEMA_LOOKUP.get(type(event))
-
-    if schema is None:
-        return event
-
-    return schema.model_validate(event).model_copy(update = {"details": []})
-
-def withhold_details(payload, claims: dict | None):
-    """
-    Strip event details for anonymous viewers so they never leave the backend.
-
-    ::param payload a single event, a list of events, or a dict of event lists (the verified routes)
-    ::param claims the JWT claims from optional_supabase_jwt, or None for anonymous viewers
-
-    ::return the payload unchanged for signed-in viewers, otherwise a redacted copy
-    """
-
-    if claims is not None:
-        return payload
-
-    if isinstance(payload, dict):
-        return {key: [_redact_event(event) for event in events] for key, events in payload.items()}
-
-    if isinstance(payload, list):
-        return [_redact_event(event) for event in payload]
-
-    return _redact_event(payload)
 
 def league_nesting(leagues: Sequence[LeagueEvents], league_parents: Sequence[LeagueParentEvents]) -> Sequence[LeagueEvents | LeagueParentsOut]:
     """
