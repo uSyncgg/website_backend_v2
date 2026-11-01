@@ -2,25 +2,40 @@ import uuid
 import logging
 import io
 import base64
+import secrets
+import string
 import unicodedata
 import re
 
-from sqlalchemy import select, insert, update, delete, Sequence
+from typing import NoReturn
+from pydantic import ValidationError
+from sqlalchemy import select, insert, update, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.exc import IntegrityError
-from datetime import datetime, timezone
 from app.schemas.users import (
-    RegistrationIn, 
-    RegistrationOut, 
-    PlayerDetails, 
-    HostDetails, 
-    Profile, 
-    Me, 
-    ProfileSettingsOut
+    RegistrationIn,
+    RegistrationOut,
+    ProfileIn,
+    ProfileType,
+    ProfileSummary,
+    Me,
+    Profile,
+    PlayerPublic,
+    HostPublic,
+    VenuePublic,
+    VenueOut,
+    PlayerSettings,
+    HostSettings,
+    VenueSettings,
+    ProfileSettingsOut,
+    ProfileUpdate,
+    PlayerUpdate,
+    HostUpdate,
+    VenueUpdate
 )
-from app.models.users import Players, Hosts, UsersParent, PlayerCompSiteAccounts, Venues
+from app.models.users import UsersParent, Profiles, ProfileLinks, Players, Hosts, Venues
 from PIL import Image, ImageOps, UnidentifiedImageError
 from supabase import AsyncClient
 from storage3.utils import StorageException
@@ -33,119 +48,147 @@ logger = logging.getLogger(__name__)
 MAX_IMAGE_SIZE = 5 * 1024 * 1024
 ACCEPTED_IMAGE_TYPES = {"JPEG", "WEBP", "PNG"}
 ALLOWED_SYMBOLS = {"_", ".", "-"}
-ALLOWED_CHAR_FORMATS = {"\u200c", "\u200d"}
+ALLOWED_CHAR_FORMATS = {"‌", "‍"}
 MIN_USER_LEN = 4
 MAX_USER_LEN = 25
 _SPLIT_RE = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Za-z])(?=\d)|(?<=\d)(?=[A-Za-z])")
 
+# public_id goes in profile URLs: random (not sequential, so profiles can't be enumerated) and short.
+PUBLIC_ID_ALPHABET = string.ascii_lowercase + string.digits
+PUBLIC_ID_LENGTH = 10
+
+DETAIL_UPDATES = {"player": PlayerUpdate, "host": HostUpdate, "venue": VenueUpdate}
+GAME_ACCOUNT_LABELS = {"battlenet": "Battle.net", "activision": "Activision", "steam": "Steam", "riot": "Riot"}
+LINK_LABELS = {
+    "twitch": "Twitch", "twitter": "Twitter", "youtube": "YouTube", "kick": "Kick", "discord": "Discord",
+    "instagram": "Instagram", "cmg": "CMG", "gankster": "Gankster", "faceit": "FACEIT", "battlefy": "Battlefy"
+}
+_USERNAME_CONFLICT_RE = re.compile(r"\(type, canonical_username\)=\((\w+),")
+_LINK_CONFLICT_RE = re.compile(r"\(platform, canonical_handle, account_id\)=\((\w+),")
+
 profanity.load_censor_words()
 
-def _build_player(player_data: PlayerDetails, user_id: str) -> Players:
+def _field_error(loc: tuple, msg: str) -> HTTPException:
     """
-    
+    A 422 shaped like FastAPI's own validation errors, so the frontend can point at the field.
     """
 
-    return Players(
-        id = user_id,
-        user_id = user_id,
-        first_name = player_data.first_name,
-        last_name = player_data.last_name,
-        phone_number = player_data.phone_number,
-        gender = player_data.gender,
-        date_of_birth = player_data.date_of_birth,
-        country = player_data.country,
-        games = player_data.interests,
-        other_games = player_data.other_games,
-        battlenet = player_data.battlenet,
-        activision = player_data.activision,
-        steam = player_data.steam,
-        riot = player_data.riot
+    return HTTPException(status_code=422, detail=[{"loc": list(loc), "msg": msg, "type": "value_error"}])
+
+def _raise_conflict(e: IntegrityError, action: str, profile_type: str | None = None) -> NoReturn:
+    """
+    Turns a unique violation from a profile write into a 409 the user can act on. Anything
+    unexpected is logged and gets a generic message.
+    """
+
+    message = str(e.orig)
+
+    if "uq_profiles_type_canonical_username" in message:
+        match = _USERNAME_CONFLICT_RE.search(message)
+        taken_type = match.group(1) if match else profile_type
+        raise HTTPException(status_code=409, detail=f"That {taken_type} username is taken.")
+
+    if "uq_profiles_account_type" in message:
+        raise HTTPException(status_code=409, detail=f"You already have a {profile_type or 'profile of that'} profile.")
+
+    if "ex_profile_links_claimed" in message:
+        match = _LINK_CONFLICT_RE.search(message)
+        label = LINK_LABELS.get(match.group(1), "linked") if match else "linked"
+        raise HTTPException(status_code=409, detail=f"That {label} account is already linked to another user.")
+
+    if "users_pkey" in message:
+        raise HTTPException(status_code=409, detail="Your profile is already set up.")
+
+    for column, label in GAME_ACCOUNT_LABELS.items():
+        if f"players_{column}_key" in message:
+            raise HTTPException(status_code=409, detail=f"That {label} account is already linked to another player.")
+
+    logger.exception("%s failed with unexpected integrity error.", action)
+    raise HTTPException(status_code=409, detail=f"{action} conflicts with existing data.")
+
+def _canonical_handle(handle: str) -> str:
+    return unicodedata.normalize("NFKC", handle).casefold()
+
+def _new_public_id() -> str:
+    return "".join(secrets.choice(PUBLIC_ID_ALPHABET) for _ in range(PUBLIC_ID_LENGTH))
+
+def _build_profile(profile: ProfileIn, account_id: str, pfp_url: str | None) -> tuple[Profiles, list[ProfileLinks | Players | Hosts | Venues]]:
+    """
+    Builds a profiles row and the rows that hang off it (links and the type's details). The
+    profile's id is set here so the child rows can point at it before anything is flushed.
+    """
+
+    row = Profiles(
+        id = uuid.uuid4(),
+        public_id = _new_public_id(),
+        account_id = account_id,
+        type = profile.type,
+        username = profile.username,
+        canonical_username = _canonical_username(profile.username),
+        bio = profile.bio,
+        profile_picture = pfp_url,
+        bracket_hosting = profile.bracket_hosting,
+        other_roles = sorted(profile.other_roles) if profile.other_roles is not None else None,
+        other_role_detail = profile.other_role_detail
     )
 
-def _build_host(host_data: HostDetails, user_id: str) -> Hosts:
+    children: list[ProfileLinks | Players | Hosts | Venues] = [
+        ProfileLinks(
+            profile_id = row.id,
+            account_id = account_id,
+            platform = platform,
+            handle = handle,
+            canonical_handle = _canonical_handle(handle)
+        )
+        for platform, handle in (profile.links or {}).items()
+    ]
+
+    details = profile.details
+
+    if profile.type == "player":
+        children.append(Players(
+            profile_id = row.id,
+            first_name = details.first_name,
+            last_name = details.last_name,
+            phone_number = details.phone_number,
+            gender = details.gender,
+            date_of_birth = details.date_of_birth,
+            country = details.country,
+            games = details.interests,
+            other_games = details.other_games,
+            battlenet = details.battlenet,
+            activision = details.activision,
+            steam = details.steam,
+            riot = details.riot
+        ))
+    elif profile.type == "host":
+        children.append(Hosts(
+            profile_id = row.id,
+            games = details.hosted_games,
+            other_games = details.other_hosted_games,
+            organization = details.organization,
+            host_country = details.host_country,
+            event_types = details.event_types
+        ))
+    else:
+        # Keyed by name since (profile_id, venue_name) is the primary key.
+        unique_locations = {v.name: v.location for v in details.locations}
+        children.extend(
+            Venues(profile_id = row.id, venue_name = name, location = location)
+            for name, location in unique_locations.items()
+        )
+
+    return row, children
+
+async def _insert_profiles(rows: list[tuple[Profiles, list]], db: AsyncSession) -> None:
     """
-    
+    Profiles are flushed before their child rows so the child foreign keys have something to point at.
     """
 
-    return Hosts (
-        id = user_id,
-        user_id = user_id,
-        games = host_data.hosted_games,
-        other_games = host_data.other_hosted_games,
-        organization = host_data.organization,
-        host_country = host_data.host_country,
-        event_types = host_data.event_types
-    )
-
-def _build_venue(payload: RegistrationIn, user_id: str) -> Sequence[Venues]:
-    """
-    
-    """
-
-    venues: Sequence[Venues] = []
-
-    for v in payload.venues:
-        if v.get("name") and v.get("location"):
-            venue = Venues(
-                id = user_id,
-                venue_name = v.get("name"),
-                location = v.get("location")
-            )
-
-            venues.append(venue)
-
-    return venues
-
-def _build_user(payload: RegistrationIn, email: str, pfp_url: str, user_id: str) -> UsersParent:
-    """
-    
-    """
-
-    return UsersParent (
-        id = user_id,
-        username = payload.username.strip(),
-        canonical_username = _canonical_username(payload.username),
-        email = email,
-        is_player = True if "player" in payload.signup_path else False,
-        is_host = True if "host" in payload.signup_path else False,
-        twitch = payload.twitch,
-        twitter = payload.twitter,
-        youtube = payload.youtube,
-        kick = payload.kick,
-        discord = payload.discord,
-        instagram = payload.instagram,
-        profile_picture = pfp_url if pfp_url != "" else None,
-        bio = payload.bio,
-        bracket_hosting = True if payload.bracket_hosting is None or payload.bracket_hosting is True else False,
-        other_roles = sorted(payload.other_roles) if payload.other_roles is not None else None,
-        other_role_detail = payload.other_role_detail
-    )
-
-async def deposit_models(models: list[UsersParent | Hosts | Players | Venues], db: AsyncSession) -> None:
-    """
-    
-    """
-    db.add(models[0])
-
-    try:
-        await db.flush()
-    except IntegrityError as e:
-        await db.rollback()
-        if "ix_users_username_player_unique" in str(e.orig):
-            raise HTTPException(status_code=409, detail="Player username is already taken. Enter a new one.")
-        if "ix_users_username_host_unique" in str(e.orig):
-            raise HTTPException(status_code=409, detail="Host username is already taken. Enter a new one.")
-        logger.exception("Registration failed with unexpected integrity error.")
-        raise HTTPException(status_code = 409, detail = "Registration conflicts with existing data.")
-
-    db.add_all(models[1:])
-
-    try:
-        await db.commit()
-    except IntegrityError as e:
-        await db.rollback()
-        logger.exception("Registration failed with unexpected integrity error.")
-        raise HTTPException(status_code = 409, detail = "Registration conflicts with existing data.")
+    db.add_all([profile for profile, _ in rows])
+    await db.flush()
+    db.add_all([child for _, children in rows for child in children])
+    await db.flush()
 
     return None
 
@@ -225,50 +268,6 @@ def _check_display_chars(username: str) -> None:
 
     return None
 
-async def handle_registration(
-        payload: RegistrationIn, 
-        email: str, 
-        pfp_url: str, 
-        pfp_path: str, 
-        user_id: str, 
-        db: AsyncSession, 
-        supabase: AsyncClient
-    ) -> RegistrationOut:
-    """
-    
-    """
-
-    user_model = _build_user(payload, email, pfp_url, user_id)
-    models = [user_model]
-
-    if "player" in payload.signup_path:
-        models.append(_build_player(payload.player, user_id))
-
-    if "host" in payload.signup_path:
-        models.append(_build_host(payload.host, user_id))
-
-    if payload.venues:
-        models.extend(_build_venue(payload, user_id))
-
-    try:
-        await deposit_models(models, db)
-    except Exception:
-        if pfp_path != "":
-            try:
-                await supabase.storage.from_("profile_pictures").remove([pfp_path])
-            except Exception:
-                logger.exception("Failed to clean up profile picture %s", pfp_path)
-
-        raise
-
-    ### NOTE: below are things for comp sites - not adding just yet
-    # cmg = player_data.cmg,
-    # gankster = player_data.gankster,
-    # faceit = player_data.faceit,
-    # battlefly = player_data.battlefly
-
-
-    return RegistrationOut(message = "Sign up form successfully submitted!")
 
 def _sanitize_pfp(raw: bytes) -> bytes:
     """
@@ -351,17 +350,68 @@ async def process_pfp(file: UploadFile, supabase: AsyncClient, user_id: str, ope
 
     return pfp_url, pfp_path
 
-async def check_valid_username(
-        username: str, 
-        db: AsyncSession, 
-        openai: AsyncOpenAI, 
-        loc: tuple[str, str], 
-        player: bool | None = None, 
-        host: bool | None = None,
-        exclude_user_id: str | None = None
-    ) -> None:
+
+async def copy_pfp(source_path: str, supabase: AsyncClient, user_id: str) -> tuple[str, str]:
     """
-    
+    Copies an already moderated picture to a new file, so another profile can use it without
+    moderating it again. Each profile gets its own file, so replacing one profile's picture
+    (which deletes its old file) never breaks another's.
+    """
+
+    path = f"{user_id}/{str(uuid.uuid4())}.webp"
+
+    try:
+        await supabase.storage.from_("profile_pictures").copy(source_path, path)
+    except StorageException:
+        logger.exception("Profile picture copy failed.")
+        raise HTTPException(502, "Could not save profile picture. Try again.")
+
+    url = await supabase.storage.from_("profile_pictures").get_public_url(path)
+
+    return url, path
+
+async def _remove_pfps(paths: list[str], supabase: AsyncClient) -> None:
+    """
+    Best-effort cleanup of pictures uploaded for a request that then failed.
+    """
+
+    if not paths:
+        return None
+
+    try:
+        await supabase.storage.from_("profile_pictures").remove(paths)
+    except Exception:
+        logger.exception("Failed to clean up profile pictures %s", paths)
+
+    return None
+
+def _check_picture_files(profiles: list[ProfileIn], files: dict[str, UploadFile | None], field: str) -> None:
+    """
+    Every profile set to "upload" has a file, and no file is sent that nothing will use.
+    `field` formats the form field name for errors, e.g. "profile_picture_{type}".
+    """
+
+    types = {p.type for p in profiles}
+
+    for profile in profiles:
+        file = files.get(profile.type)
+
+        if profile.picture == "upload" and file is None:
+            raise _field_error(("body", field.format(type=profile.type)), "Upload a picture or choose another picture option.")
+
+        if profile.picture != "upload" and file is not None:
+            raise _field_error(("body", field.format(type=profile.type)), "A picture was sent but this profile isn't set to upload one.")
+
+    for profile_type, file in files.items():
+        if file is not None and profile_type not in types:
+            raise _field_error(("body", field.format(type=profile_type)), "A picture was sent for a profile that isn't being created.")
+
+    return None
+
+async def validate_username(username: str, openai: AsyncOpenAI, loc: tuple) -> None:
+    """
+    The format and moderation rules for a new username. Doesn't touch the database, so it can
+    run (including the OpenAI call) without holding a connection.
     """
 
     normalized = _normalize_username(username)
@@ -374,196 +424,120 @@ async def check_valid_username(
         profanity_moderation(normalized, split)
         await openai_username_moderation(normalized, split, openai)
     except ValueError as e:
-        raise HTTPException(status_code=422, detail=[{"loc": list(loc), "msg": str(e), "type": "value_error"}])        
-
-    stmt = (
-        select(UsersParent)
-        .where(UsersParent.canonical_username == canonical_username)
-    )
-
-    if exclude_user_id:
-        stmt = stmt.where(UsersParent.id != exclude_user_id)
-
-    # A name can belong to one player account and a different host account, so check every match.
-    result = await db.execute(stmt)
-
-    for user in result.scalars().all():
-        if player is True and user.is_player is True:
-            raise HTTPException(status_code = 409, detail="Username is taken.")
-
-        if host is True and user.is_host is True:
-            raise HTTPException(status_code = 409, detail="Username is taken.")
+        raise _field_error(loc, str(e))
 
     return None
 
-def _build_venues(venues: list[Venues]) -> list[dict]:
+async def check_username_available(username: str, profile_type: ProfileType, db: AsyncSession, loc: tuple) -> None:
     """
-    
-    """
-
-    venue_list = []
-
-    if len(venues) == 0:
-        return venue_list
-
-    for venue in venues:
-        venue_list.append({"name": venue.venue_name, "location": venue.location})
-
-    return venue_list
-
-def _build_profile(user: UsersParent, player: Players | None, host: Hosts | None, venues: list[Venues]) -> Profile:
-    """
-    
+    409 if another profile of the same type has this name. A player and a host can share one.
+    The unique constraint is the real guard; this gives a friendly error before any uploads.
     """
 
-    profile = Profile(
-        username = user.username,
-        verified = user.verified,
-        is_player = user.is_player,
-        is_host = user.is_host,
-        bio = user.bio,
-        other_roles = user.other_roles,
-        other_role_detail = user.other_role_detail,
-        profile_picture = user.profile_picture
+    result = await db.execute(
+        select(Profiles.id)
+        .where(Profiles.type == profile_type)
+        .where(Profiles.canonical_username == _canonical_username(username))
     )
 
-    if player:
-        if "Other" in player.games:
-            player.games.pop(player.games.index("Other"))
+    if result.first() is not None:
+        raise HTTPException(status_code = 409, detail=f"That {profile_type} username is taken.")
 
-        profile.games = player.games
+    return None
 
-    if host:
-        if "Other" in host.games:
-            host.games.pop(host.games.index("Other"))
-
-        profile.host_games = host.games
-        profile.organization = host.organization
-        profile.event_types = host.event_types
-
-    if len(venues) > 0:
-        profile.venues = _build_venues(venues)
-
-    return profile
-
-async def get_profile(username: str, db: AsyncSession) -> Profile:
+async def check_valid_username(username: str, profile_type: ProfileType, db: AsyncSession, openai: AsyncOpenAI, loc: tuple) -> None:
     """
-    
-    """
-    canonical = _canonical_username(username)
-
-    player = None
-    host = None
-    venues = []
-
-    user_stmt = (
-        select(UsersParent)
-        .where(UsersParent.canonical_username == canonical)
-    )
-
-    result = await db.execute(user_stmt)
-    user = result.scalars().first()
-
-    if not user:
-        raise HTTPException(status_code=404, detail="User does not exist.")
-
-    player_stmt = (
-        select(Players)
-        .where(Players.user_id == user.id)
-    )
-
-    result = await db.execute(player_stmt)
-    player = result.scalars().first() 
-
-    host_stmt = (
-        select(Hosts)
-        .where(Hosts.user_id == user.id)
-    )
-
-    result = await db.execute(host_stmt)
-    host = result.scalars().first()
-
-    venue_stmt = (
-        select(Venues)
-        .where(Venues.id == user.id)
-    )
-
-    result = await db.execute(venue_stmt)
-    venues = result.scalars().all()
-
-    return _build_profile(user, player, host, venues)
-
-async def get_me(user_id: str, db: AsyncSession) -> Me:
-    """
-    Fetches the signed in user's navbar details. A 404 means the user has signed up
-    through Supabase but has not completed their profile yet.
+    Full check used by the sign up form's live username field.
     """
 
-    result = await db.execute(select(UsersParent).where(UsersParent.id == user_id))
-    user = result.scalars().first()
+    await validate_username(username, openai, loc)
+    await check_username_available(username, profile_type, db, loc)
 
-    if not user:
-        raise HTTPException(status_code=404, detail="Profile not completed.")
+    return None
 
-    return Me(username=user.username, profile_picture=user.profile_picture)
-
-async def get_profile_settings(user_id: str, db: AsyncSession) -> ProfileSettingsOut:
+async def handle_registration(
+        payload: RegistrationIn,
+        files: dict[str, UploadFile | None],
+        email: str,
+        user_id: str,
+        db: AsyncSession,
+        supabase: AsyncClient,
+        openai: AsyncOpenAI
+    ) -> RegistrationOut:
     """
-    
+    Creates the account's users row and one profile per entry, then points the account at its
+    chosen default. Database checks run first and the connection is released before the slow
+    outside calls (username moderation, picture moderation and uploads); everything is then
+    written in one transaction, and uploaded pictures are removed if that fails.
     """
 
-    user_result = await db.execute(select(UsersParent).where(UsersParent.id == user_id))
-    user = user_result.scalars().first()
+    _check_picture_files(payload.profiles, files, "profile_picture_{type}")
 
-    player = None
-    host = None
+    existing = await db.execute(select(UsersParent.id).where(UsersParent.id == user_id))
 
-    if not user:
-        raise HTTPException(status_code=404, detail="Profile not found.")
+    if existing.first() is not None:
+        raise HTTPException(status_code=409, detail="Your profile is already set up.")
 
-    settings = ProfileSettingsOut(
-        username = user.username,
-        verified = user.verified,
-        is_player = user.is_player,
-        is_host = user.is_host,
-        bio = user.bio,
-        bracket_hosting = user.bracket_hosting,
-        other_roles = user.other_roles if user.other_roles else [],
-        other_role_detail = user.other_role_detail,
-        profile_picture = user.profile_picture
-    )
+    for i, profile in enumerate(payload.profiles):
+        await check_username_available(profile.username, profile.type, db, ("body", "profiles", i, "username"))
 
-    if user.is_player:
-        player_result = await db.execute(select(Players).where(Players.id == user_id))
-        player = player_result.scalars().first()
+    # Release the connection before the outside calls below.
+    await db.rollback()
 
-    if user.is_host:
-        host_result = await db.execute(select(Hosts).where(Hosts.id == user_id))
-        host = host_result.scalars().first()
+    for i, profile in enumerate(payload.profiles):
+        await validate_username(profile.username, openai, ("body", "profiles", i, "username"))
 
-    if player:
-        settings.interests = player.games if player.games else []
-        settings.other_games = player.other_games
-        settings.first_name = player.first_name
-        settings.last_name = player.last_name
-        settings.phone_number = player.phone_number
-        settings.gender = player.gender
-        settings.date_of_birth = player.date_of_birth
-        settings.country = player.country
+    urls, paths = await _prepare_pictures(payload, files, supabase, user_id, openai)
 
-    if host:
-        settings.organization = host.organization
-        settings.hosted_games = host.games if host.games else []
-        settings.other_hosted_games = host.other_games
-        settings.host_country = host.host_country
-        settings.event_types = host.event_types if host.event_types else []
+    try:
+        user = UsersParent(id = user_id, email = email)
+        db.add(user)
+        await db.flush()
 
-    venue_result = await db.execute(select(Venues).where(Venues.id == user_id))
-    venues = venue_result.scalars().all()
+        rows = [_build_profile(p, user_id, urls.get(p.type)) for p in payload.profiles]
+        await _insert_profiles(rows, db)
 
-    settings.venues = _build_venues(venues)
+        user.default_profile_id = next(row.id for row, _ in rows if row.type == payload.default_profile)
+        await db.commit()
+    except IntegrityError as e:
+        await db.rollback()
+        await _remove_pfps(paths, supabase)
+        _raise_conflict(e, "Registration")
+    except Exception:
+        await db.rollback()
+        await _remove_pfps(paths, supabase)
+        raise
 
-    return settings
+    return RegistrationOut(message = "Sign up form successfully submitted!")
+
+async def _prepare_pictures(
+        payload: RegistrationIn,
+        files: dict[str, UploadFile | None],
+        supabase: AsyncClient,
+        user_id: str,
+        openai: AsyncOpenAI
+    ) -> tuple[dict[str, str], list[str]]:
+    """
+    Processes sign up pictures: the default profile's first (its copies depend on it), then the
+    other uploads, then copies of the default. Returns each profile type's URL and every stored
+    path, so the caller can clean up. If one fails, the ones already stored are removed.
+    """
+
+    order = sorted(payload.profiles, key = lambda p: (p.type != payload.default_profile, p.picture == "copy_default"))
+    urls: dict[str, str] = {}
+    paths: dict[str, str] = {}
+
+    try:
+        for profile in order:
+            if profile.picture == "upload":
+                urls[profile.type], paths[profile.type] = await process_pfp(files[profile.type], supabase, user_id, openai)
+            elif profile.picture == "copy_default":
+                urls[profile.type], paths[profile.type] = await copy_pfp(paths[payload.default_profile], supabase, user_id)
+    except Exception:
+        await _remove_pfps(list(paths.values()), supabase)
+        raise
+
+    return urls, list(paths.values())
 
 async def _get_user(user_id: str, db: AsyncSession) -> UsersParent:
     """
@@ -578,51 +552,411 @@ async def _get_user(user_id: str, db: AsyncSession) -> UsersParent:
 
     return user
 
-async def update_profile_section(
-    user_id: str, 
-    table: type[UsersParent] | type[Players] | type[Hosts], 
-    payload: dict,
-    db: AsyncSession
+async def _get_own_profile(user_id: str, profile_type: ProfileType, db: AsyncSession) -> Profiles:
+    """
+    Loads one of the signed in user's profiles by type, or raises a 404 if they don't have one.
+    """
+
+    result = await db.execute(
+        select(Profiles).where(Profiles.account_id == user_id).where(Profiles.type == profile_type)
+    )
+    profile = result.scalars().first()
+
+    if not profile:
+        raise HTTPException(status_code=404, detail=f"You don't have a {profile_type} profile.")
+
+    return profile
+
+def _summary(profile: Profiles) -> ProfileSummary:
+    return ProfileSummary(
+        type = profile.type,
+        username = profile.username,
+        public_id = profile.public_id,
+        profile_picture = profile.profile_picture
+    )
+
+async def _account_profiles(account_id, db: AsyncSession) -> list[Profiles]:
+    result = await db.execute(
+        select(Profiles).where(Profiles.account_id == account_id).order_by(Profiles.created_at, Profiles.type)
+    )
+
+    return list(result.scalars().all())
+
+async def _links(profile_id, db: AsyncSession) -> dict[str, str]:
+    result = await db.execute(select(ProfileLinks).where(ProfileLinks.profile_id == profile_id))
+
+    return {link.platform: link.handle for link in result.scalars().all()}
+
+async def _locations(profile_id, db: AsyncSession) -> list[VenueOut]:
+    result = await db.execute(select(Venues).where(Venues.profile_id == profile_id).order_by(Venues.venue_name))
+
+    return [VenueOut(name = v.venue_name, location = v.location) for v in result.scalars().all()]
+
+def _without_other(games: list[str] | None) -> list[str]:
+    return [g for g in (games or []) if g != "Other"]
+
+async def get_me(user_id: str, db: AsyncSession) -> Me:
+    """
+    The navbar's data: the default profile plus every profile on the account for the view
+    switcher. 404 if sign up hasn't been completed.
+    """
+
+    result = await db.execute(select(UsersParent).where(UsersParent.id == user_id))
+    user = result.scalars().first()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="Profile not completed.")
+
+    profiles = await _account_profiles(user_id, db)
+    default = next((_summary(p) for p in profiles if p.id == user.default_profile_id), None)
+
+    return Me(verified = user.verified, default_profile = default, profiles = [_summary(p) for p in profiles])
+
+async def get_profile(public_id: str, db: AsyncSession) -> Profile:
+    """
+    A public profile page by its public_id. Only this profile's details are loaded; the
+    account's other profiles come from the profiles table alone, for the view switcher.
+    """
+
+    result = await db.execute(
+        select(Profiles, UsersParent.verified)
+        .join(UsersParent, UsersParent.id == Profiles.account_id)
+        .where(Profiles.public_id == public_id)
+    )
+    row = result.first()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="User does not exist.")
+
+    profile, verified = row
+
+    if profile.type == "player":
+        player = (await db.execute(select(Players).where(Players.profile_id == profile.id))).scalars().first()
+        details = PlayerPublic(games = _without_other(player.games if player else None))
+    elif profile.type == "host":
+        host = (await db.execute(select(Hosts).where(Hosts.profile_id == profile.id))).scalars().one()
+        details = HostPublic(
+            organization = host.organization,
+            hosted_games = _without_other(host.games),
+            event_types = host.event_types or []
+        )
+    else:
+        details = VenuePublic(locations = await _locations(profile.id, db))
+
+    others = [_summary(p) for p in await _account_profiles(profile.account_id, db) if p.id != profile.id]
+
+    return Profile(
+        public_id = profile.public_id,
+        type = profile.type,
+        username = profile.username,
+        verified = verified,
+        bio = profile.bio,
+        profile_picture = profile.profile_picture,
+        other_roles = profile.other_roles or set(),
+        other_role_detail = profile.other_role_detail,
+        links = await _links(profile.id, db),
+        details = details,
+        others = others
+    )
+
+async def get_profile_settings(user_id: str, profile_type: ProfileType, db: AsyncSession) -> ProfileSettingsOut:
+    """
+    Everything the owner can edit on one of their profiles.
+    """
+
+    result = await db.execute(
+        select(Profiles, UsersParent.verified, UsersParent.default_profile_id)
+        .join(UsersParent, UsersParent.id == Profiles.account_id)
+        .where(Profiles.account_id == user_id)
+        .where(Profiles.type == profile_type)
+    )
+    row = result.first()
+
+    if not row:
+        raise HTTPException(status_code=404, detail=f"You don't have a {profile_type} profile.")
+
+    profile, verified, default_profile_id = row
+
+    if profile_type == "player":
+        player = (await db.execute(select(Players).where(Players.profile_id == profile.id))).scalars().one()
+        details = PlayerSettings(
+            first_name = player.first_name,
+            last_name = player.last_name,
+            phone_number = player.phone_number,
+            gender = player.gender,
+            date_of_birth = player.date_of_birth,
+            country = player.country,
+            interests = player.games or [],
+            other_games = player.other_games,
+            battlenet = player.battlenet,
+            activision = player.activision,
+            steam = player.steam,
+            riot = player.riot
+        )
+    elif profile_type == "host":
+        host = (await db.execute(select(Hosts).where(Hosts.profile_id == profile.id))).scalars().one()
+        details = HostSettings(
+            organization = host.organization,
+            hosted_games = host.games or [],
+            other_hosted_games = host.other_games,
+            host_country = host.host_country,
+            event_types = host.event_types or []
+        )
+    else:
+        details = VenueSettings(locations = await _locations(profile.id, db))
+
+    return ProfileSettingsOut(
+        public_id = profile.public_id,
+        type = profile.type,
+        username = profile.username,
+        verified = verified,
+        is_default = profile.id == default_profile_id,
+        bio = profile.bio,
+        profile_picture = profile.profile_picture,
+        bracket_hosting = profile.bracket_hosting,
+        other_roles = profile.other_roles or set(),
+        other_role_detail = profile.other_role_detail,
+        links = await _links(profile.id, db),
+        details = details
+    )
+
+async def add_profile(
+    user_id: str,
+    profile: ProfileIn,
+    file: UploadFile | None,
+    db: AsyncSession,
+    supabase: AsyncClient,
+    openai: AsyncOpenAI
 ) -> ProfileSettingsOut:
     """
-    Applies a partial update to one of the user's tables (users, players or hosts). Venues
-    ride along on the users update and are replaced as a whole set in the same transaction.
-    A 404 means the row doesn't exist, e.g. a player-only user updating host details.
+    Adds a new profile type to an existing account (e.g. a player who starts hosting). It gets
+    its own username, so nothing about the account's other profiles changes. Same order as sign
+    up: database checks, release the connection, outside calls, then one write.
     """
 
-    venues = payload.pop("venues", None)
+    _check_picture_files([profile], {profile.type: file}, "profile_picture")
 
-    if payload:
-        result = await db.execute(
-            update(table).where(table.id == user_id).values(**payload).returning(table.id)
-        )
+    user = await _get_user(user_id, db)
 
-        if result.scalar_one_or_none() is None:
-            await db.rollback()
-            raise HTTPException(status_code=404, detail="Profile not found.")
-    elif venues is not None:
-        await _get_user(user_id, db)
+    existing = await db.execute(
+        select(Profiles.id).where(Profiles.account_id == user_id).where(Profiles.type == profile.type)
+    )
 
-    if venues is not None:
-        # Keyed by name since (id, venue_name) is the primary key.
-        unique_venues = {v["name"]: v["location"] for v in venues}
+    if existing.first() is not None:
+        raise HTTPException(status_code=409, detail=f"You already have a {profile.type} profile.")
 
-        await db.execute(delete(Venues).where(Venues.id == user_id))
+    await check_username_available(profile.username, profile.type, db, ("body", "username"))
 
-        if unique_venues:
-            await db.execute(
-                insert(Venues),
-                [{"id": user_id, "venue_name": name, "location": location} for name, location in unique_venues.items()]
-            )
+    default_picture = None
+
+    if profile.picture == "copy_default":
+        result = await db.execute(select(Profiles.profile_picture).where(Profiles.id == user.default_profile_id))
+        default_picture = result.scalar_one_or_none()
+
+        if not default_picture or not _storage_path(default_picture):
+            raise _field_error(("body", "picture"), "Your default profile has no picture to copy.")
+
+    # Release the connection before the outside calls below.
+    await db.rollback()
+
+    await validate_username(profile.username, openai, ("body", "username"))
+
+    pfp_url = None
+    pfp_path = None
+
+    if profile.picture == "upload":
+        pfp_url, pfp_path = await process_pfp(file, supabase, user_id, openai)
+    elif profile.picture == "copy_default":
+        pfp_url, pfp_path = await copy_pfp(_storage_path(default_picture), supabase, user_id)
+
+    paths = [pfp_path] if pfp_path else []
 
     try:
+        await _insert_profiles([_build_profile(profile, user_id, pfp_url)], db)
         await db.commit()
-    except IntegrityError:
+    except IntegrityError as e:
         await db.rollback()
-        logger.exception("Profile update failed with unexpected integrity error.")
-        raise HTTPException(status_code=409, detail="Update conflicts with existing data.")
+        await _remove_pfps(paths, supabase)
+        _raise_conflict(e, "Adding the profile", profile.type)
+    except Exception:
+        await db.rollback()
+        await _remove_pfps(paths, supabase)
+        raise
 
-    return await get_profile_settings(user_id, db)
+    return await get_profile_settings(user_id, profile.type, db)
+
+async def _apply_profile_changes(
+    user_id: str,
+    profile_id,
+    profile_type: ProfileType,
+    payload: dict,
+    links: dict | None,
+    details_values: dict | None,
+    db: AsyncSession
+) -> None:
+    """
+    The writes behind update_profile, without committing.
+    """
+
+    if payload:
+        await db.execute(update(Profiles).where(Profiles.id == profile_id).values(**payload))
+
+    if links is not None:
+        await db.execute(delete(ProfileLinks).where(ProfileLinks.profile_id == profile_id))
+
+        if links:
+            await db.execute(
+                insert(ProfileLinks),
+                [
+                    {
+                        "profile_id": profile_id,
+                        "account_id": user_id,
+                        "platform": platform,
+                        "handle": handle,
+                        "canonical_handle": _canonical_handle(handle)
+                    }
+                    for platform, handle in links.items()
+                ]
+            )
+
+    if details_values:
+        if profile_type == "venue":
+            # Keyed by name since (profile_id, venue_name) is the primary key.
+            unique_locations = {v["name"]: v["location"] for v in details_values["locations"]}
+
+            await db.execute(delete(Venues).where(Venues.profile_id == profile_id))
+            await db.execute(
+                insert(Venues),
+                [{"profile_id": profile_id, "venue_name": name, "location": location} for name, location in unique_locations.items()]
+            )
+        else:
+            table = Players if profile_type == "player" else Hosts
+            await db.execute(update(table).where(table.profile_id == profile_id).values(**details_values))
+
+    return None
+
+async def update_profile(user_id: str, profile_type: ProfileType, changes: ProfileUpdate, db: AsyncSession) -> ProfileSettingsOut:
+    """
+    Partially updates one of the user's profiles. Links and venue locations, when sent, are
+    replaced as a whole set. Everything is written in one transaction.
+    """
+
+    payload = changes.model_dump(exclude_unset=True)
+    links = payload.pop("links", None)
+    details = payload.pop("details", None)
+    details_values = None
+
+    if details is not None:
+        try:
+            details_values = DETAIL_UPDATES[profile_type].model_validate(details).model_dump(exclude_unset=True, by_alias=True)
+        except ValidationError as e:
+            raise HTTPException(
+                status_code=422,
+                detail=[{**err, "loc": ["body", "details", *err["loc"]]} for err in e.errors(include_context=False, include_url=False)]
+            )
+
+    profile = await _get_own_profile(user_id, profile_type, db)
+    profile_id = profile.id
+
+    # Constraints are checked as each statement runs, so the writes sit inside the try too.
+    try:
+        await _apply_profile_changes(user_id, profile_id, profile_type, payload, links, details_values, db)
+        await db.commit()
+    except IntegrityError as e:
+        await db.rollback()
+        _raise_conflict(e, "Profile update", profile_type)
+
+    return await get_profile_settings(user_id, profile_type, db)
+
+async def update_profile_picture(
+    user_id: str,
+    profile_type: ProfileType,
+    file: UploadFile,
+    db: AsyncSession,
+    supabase: AsyncClient,
+    openai: AsyncOpenAI
+) -> ProfileSettingsOut:
+    """
+    Replaces one profile's picture. The connection is released during moderation and upload.
+    The new file is saved before the old one is removed, so a failure part way through never
+    leaves the profile without a picture.
+    """
+
+    profile = await _get_own_profile(user_id, profile_type, db)
+    profile_id = profile.id
+    old_url = profile.profile_picture
+
+    # Release the connection before the outside calls below.
+    await db.rollback()
+
+    pfp_url, pfp_path = await process_pfp(file, supabase, user_id, openai)
+
+    try:
+        await db.execute(update(Profiles).where(Profiles.id == profile_id).values(profile_picture = pfp_url))
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        await _remove_pfps([pfp_path], supabase)
+        raise
+
+    old_path = _storage_path(old_url) if old_url else None
+
+    if old_path and old_path != pfp_path:
+        try:
+            await supabase.storage.from_("profile_pictures").remove([old_path])
+        except Exception:
+            logger.exception("Failed to remove old profile picture %s", old_path)
+
+    return await get_profile_settings(user_id, profile_type, db)
+
+async def change_username(user_id: str, profile_type: ProfileType, username: str, db: AsyncSession, openai: AsyncOpenAI) -> ProfileSettingsOut:
+    """
+    Renames one of the user's profiles; the others keep their names. A change that only differs
+    in casing skips the length and moderation rules the name already passed, and only rechecks
+    for invisible characters. Otherwise the full sign up rules apply, with the connection
+    released during the moderation call.
+    """
+
+    profile = await _get_own_profile(user_id, profile_type, db)
+    profile_id = profile.id
+    canonical = _canonical_username(username)
+    loc = ("body", "username")
+
+    if canonical == profile.canonical_username:
+        try:
+            _check_display_chars(username)
+        except ValueError as e:
+            raise _field_error(loc, str(e))
+    else:
+        await check_username_available(username, profile_type, db, loc)
+
+        # Release the connection before the moderation call.
+        await db.rollback()
+
+        await validate_username(username, openai, loc)
+
+    try:
+        await db.execute(
+            update(Profiles).where(Profiles.id == profile_id).values(username = username.strip(), canonical_username = canonical)
+        )
+        await db.commit()
+    except IntegrityError as e:
+        await db.rollback()
+        _raise_conflict(e, "Username change", profile_type)
+
+    return await get_profile_settings(user_id, profile_type, db)
+
+async def set_default_profile(user_id: str, profile_type: ProfileType, db: AsyncSession) -> Me:
+    """
+    Makes one of the user's profiles their default (navbar picture and name, first view).
+    """
+
+    profile = await _get_own_profile(user_id, profile_type, db)
+
+    await db.execute(update(UsersParent).where(UsersParent.id == user_id).values(default_profile_id = profile.id))
+    await db.commit()
+
+    return await get_me(user_id, db)
 
 def _storage_path(pfp_url: str) -> str | None:
     """
@@ -636,76 +970,6 @@ def _storage_path(pfp_url: str) -> str | None:
 
     return pfp_url.split(marker, 1)[1].split("?", 1)[0]
 
-async def update_profile_picture(
-    user_id: str,
-    file: UploadFile,
-    db: AsyncSession,
-    supabase: AsyncClient,
-    openai: AsyncOpenAI
-) -> Me:
-    """
-    Replaces the user's profile picture. The new file is saved before the old one is removed,
-    so a failure part way through never leaves the user without a picture.
-    """
-
-    user = await _get_user(user_id, db)
-    old_url = user.profile_picture
-
-    pfp_url, pfp_path = await process_pfp(file, supabase, user_id, openai)
-    user.profile_picture = pfp_url
-
-    try:
-        await db.commit()
-    except Exception:
-        await db.rollback()
-        try:
-            await supabase.storage.from_("profile_pictures").remove([pfp_path])
-        except Exception:
-            logger.exception("Failed to clean up profile picture %s", pfp_path)
-        raise
-
-    old_path = _storage_path(old_url) if old_url else None
-
-    if old_path and old_path != pfp_path:
-        try:
-            await supabase.storage.from_("profile_pictures").remove([old_path])
-        except Exception:
-            logger.exception("Failed to remove old profile picture %s", old_path)
-
-    return Me(username=user.username, profile_picture=user.profile_picture)
-
-async def change_username(user_id: str, username: str, db: AsyncSession, openai: AsyncOpenAI) -> Me:
-    """
-    Changes the signed in user's username. The same moderation and availability rules as
-    sign up apply, checked against the user's own player/host roles, ignoring their own row
-    so a casing-only change is allowed.
-    """
-
-    user = await _get_user(user_id, db)
-
-    await check_valid_username(
-        username,
-        db,
-        openai,
-        ("body", "username"),
-        user.is_player,
-        user.is_host,
-        exclude_user_id = user_id
-    )
-
-    user.username = username.strip()
-    user.canonical_username = _canonical_username(username)
-
-    try:
-        await db.commit()
-    except IntegrityError as e:
-        await db.rollback()
-        if "ix_users_username_player_unique" in str(e.orig) or "ix_users_username_host_unique" in str(e.orig):
-            raise HTTPException(status_code=409, detail="Username is taken.")
-        logger.exception("Username change failed with unexpected integrity error.")
-        raise HTTPException(status_code=409, detail="Username change conflicts with existing data.")
-
-    return Me(username=user.username, profile_picture=user.profile_picture)
 
 async def delete_account(user_id: str, db: AsyncSession, supabase: AsyncClient) -> None:
     """
