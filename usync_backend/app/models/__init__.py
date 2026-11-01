@@ -3,6 +3,8 @@ from app.models.form_data import FormParent, GeneralForm
 from app.models.tournaments import TournamentParent, CodTournament
 from app.models.users import (
     UsersParent, 
+    Profiles,
+    ProfileLinks,
     Players, 
     Hosts, 
     CompetitiveSiteGames,

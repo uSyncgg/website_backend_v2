@@ -1,53 +1,85 @@
 import uuid
 
-from datetime import date
+from datetime import date, datetime
 from app.models.base import Base
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy import ForeignKey, String, Index, text, UniqueConstraint
-from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy import ForeignKey, ForeignKeyConstraint, String, DateTime, text, UniqueConstraint
+from sqlalchemy.dialects.postgresql import ARRAY, ENUM
+
+# The enum types are created by the migration, so the models never try to create them.
+PROFILE_TYPE = ENUM("player", "host", "venue", name = "profile_type", create_type = False)
+LINK_PLATFORM = ENUM("twitch", "twitter", "youtube", "kick", "discord", "instagram", name = "link_platform", create_type = False)
 
 class UsersParent(Base):
     """
-    SQL Alchemy model describing the users table.
+    SQL Alchemy model describing the users table. One row per account: only account-level data
+    lives here. Usernames and everything shown on a profile live on that account's profiles.
     """
 
     __tablename__ = "users"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, unique = True)
+    email: Mapped[str] = mapped_column()
+    verified: Mapped[bool] = mapped_column(default = False, server_default=text("false"))
+    default_profile_id: Mapped[uuid.UUID | None] = mapped_column(nullable = True)
+
+    __table_args__ = (
+        # Two-column FK so the default can only be one of this account's own profiles.
+        ForeignKeyConstraint(
+            ["id", "default_profile_id"],
+            ["profiles.account_id", "profiles.id"],
+            name = "fk_users_default_profile",
+            use_alter = True
+        ),
+    )
+
+class Profiles(Base):
+    """
+    SQL Alchemy model describing the profiles table. One row per public profile; an account has
+    at most one profile of each type. The type's own details live in players, hosts or venues.
+    """
+
+    __tablename__ = "profiles"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
+    public_id: Mapped[str] = mapped_column()
+    account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete = "CASCADE"))
+    type: Mapped[str] = mapped_column(PROFILE_TYPE)
     username: Mapped[str] = mapped_column()
     canonical_username: Mapped[str] = mapped_column()
-    email: Mapped[str] = mapped_column()
-    is_player: Mapped[bool] = mapped_column()
-    is_host: Mapped[bool] = mapped_column()
-    twitch: Mapped[str | None] = mapped_column(nullable = True)
-    twitter: Mapped[str | None] = mapped_column(nullable = True)
-    youtube: Mapped[str | None] = mapped_column(nullable = True)
-    kick: Mapped[str | None] = mapped_column(nullable = True)
-    discord: Mapped[str | None] = mapped_column(nullable = True)
-    instagram: Mapped[str | None] = mapped_column(nullable = True)
-    profile_picture: Mapped[str | None] = mapped_column(nullable = True)
     bio: Mapped[str | None] = mapped_column(nullable = True)
+    profile_picture: Mapped[str | None] = mapped_column(nullable = True)
     bracket_hosting: Mapped[bool] = mapped_column(default = True, server_default=text("true"))
     other_roles: Mapped[list[str] | None] = mapped_column(ARRAY(String), default = [], nullable = True)
     other_role_detail: Mapped[str | None] = mapped_column(nullable = True)
-    verified: Mapped[bool] = mapped_column(default = False, server_default=text("false"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default=text("now()"))
 
     __table_args__ = (
-        Index("ix_users_username_player_unique", "canonical_username", unique=True,
-            postgresql_where=text("is_player = true")),
-        Index("ix_users_username_host_unique", "canonical_username", unique=True,
-            postgresql_where=text("is_host = true")),
+        UniqueConstraint("public_id", name = "uq_profiles_public_id"),
+        UniqueConstraint("type", "canonical_username", name = "uq_profiles_type_canonical_username"),
+        UniqueConstraint("account_id", "type", name = "uq_profiles_account_type"),
+        UniqueConstraint("account_id", "id", name = "uq_profiles_account_id_id"),
     )
-    
+
+class ProfileLinks(Base):
+    """
+    SQL Alchemy model describing the profile_links table: one social handle per platform per profile.
+    """
+
+    __tablename__ = "profile_links"
+
+    profile_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("profiles.id", ondelete = "CASCADE"), primary_key = True)
+    platform: Mapped[str] = mapped_column(LINK_PLATFORM, primary_key = True)
+    handle: Mapped[str] = mapped_column()
+
 class Players(Base):
     """
-    SQL Alchemy model describing the players table.    
+    SQL Alchemy model describing the players table: the details of a player profile.
     """
     
     __tablename__ = "players"
     
-    id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete = "CASCADE"), index = True)
+    profile_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("profiles.id", ondelete = "CASCADE"), primary_key = True)
     first_name: Mapped[str] = mapped_column()
     last_name: Mapped[str] = mapped_column()
     phone_number: Mapped[str | None] = mapped_column(nullable = True)
@@ -60,32 +92,29 @@ class Players(Base):
     riot: Mapped[str | None] = mapped_column(unique = True, nullable = True)
     games: Mapped[list[str]] = mapped_column(ARRAY(String), default = [], nullable = True)
     other_games: Mapped[str | None] = mapped_column(nullable = True)
-    # Don't forget profile pic
 
 class Hosts(Base):
     """
-    SQL Alchemy model describing the hosts table.
+    SQL Alchemy model describing the hosts table: the details of a host profile.
     """
 
     __tablename__ = "hosts"
 
-    id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete = "CASCADE"), index = True)
+    profile_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("profiles.id", ondelete = "CASCADE"), primary_key = True)
     games: Mapped[list[str]] = mapped_column(ARRAY(String), default = [], nullable = True)
     other_games: Mapped[str | None] = mapped_column(nullable = True)
     organization: Mapped[str] = mapped_column()
     host_country: Mapped[str] = mapped_column()
     event_types: Mapped[list[str]] = mapped_column(ARRAY(String), default = [], nullable = True)
-    # Don't forget profile pic
 
 class Venues(Base):
     """
-    
+    SQL Alchemy model describing the venues table: one row per location of a venue profile.
     """
 
     __tablename__ = "venues"
 
-    id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete = "CASCADE"), primary_key = True, default = uuid.uuid4)
+    profile_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("profiles.id", ondelete = "CASCADE"), primary_key = True)
     venue_name: Mapped[str] = mapped_column(primary_key = True)
     location: Mapped[str] = mapped_column()
 
@@ -117,7 +146,7 @@ class PlayerCompSiteAccounts(Base):
     __tablename__ = "player_comp_site_accounts"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, unique = True, default = uuid.uuid4)
-    player_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("players.id", ondelete = "CASCADE"))
+    player_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("players.profile_id", ondelete = "CASCADE"))
     site_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("competitive_sites.id"))
     username: Mapped[str] = mapped_column()
 
