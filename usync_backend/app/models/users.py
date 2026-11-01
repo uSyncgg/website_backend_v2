@@ -4,11 +4,15 @@ from datetime import date, datetime
 from app.models.base import Base
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy import ForeignKey, ForeignKeyConstraint, String, DateTime, text, UniqueConstraint
-from sqlalchemy.dialects.postgresql import ARRAY, ENUM
+from sqlalchemy.dialects.postgresql import ARRAY, ENUM, ExcludeConstraint
 
 # The enum types are created by the migration, so the models never try to create them.
 PROFILE_TYPE = ENUM("player", "host", "venue", name = "profile_type", create_type = False)
-LINK_PLATFORM = ENUM("twitch", "twitter", "youtube", "kick", "discord", "instagram", name = "link_platform", create_type = False)
+LINK_PLATFORM = ENUM(
+    "twitch", "twitter", "youtube", "kick", "discord", "instagram",
+    "cmg", "gankster", "faceit", "battlefy",
+    name = "link_platform", create_type = False
+)
 
 class UsersParent(Base):
     """
@@ -63,14 +67,31 @@ class Profiles(Base):
 
 class ProfileLinks(Base):
     """
-    SQL Alchemy model describing the profile_links table: one social handle per platform per profile.
+    SQL Alchemy model describing the profile_links table: one linked account per platform per
+    profile. A handle can be on several profiles of the same account, but only one account.
     """
 
     __tablename__ = "profile_links"
 
-    profile_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("profiles.id", ondelete = "CASCADE"), primary_key = True)
+    profile_id: Mapped[uuid.UUID] = mapped_column(primary_key = True)
+    account_id: Mapped[uuid.UUID] = mapped_column()
     platform: Mapped[str] = mapped_column(LINK_PLATFORM, primary_key = True)
     handle: Mapped[str] = mapped_column()
+    canonical_handle: Mapped[str] = mapped_column()
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["account_id", "profile_id"],
+            ["profiles.account_id", "profiles.id"],
+            name = "profile_links_profile_fkey",
+            ondelete = "CASCADE"
+        ),
+        ExcludeConstraint(
+            ("platform", "="), ("canonical_handle", "="), ("account_id", "<>"),
+            name = "ex_profile_links_claimed",
+            using = "gist"
+        ),
+    )
 
 class Players(Base):
     """

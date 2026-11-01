@@ -28,7 +28,9 @@ depends_on: Union[str, Sequence[str], None] = None
 
 profile_type = postgresql.ENUM('player', 'host', 'venue', name='profile_type', create_type=False)
 link_platform = postgresql.ENUM(
-    'twitch', 'twitter', 'youtube', 'kick', 'discord', 'instagram', name='link_platform', create_type=False
+    'twitch', 'twitter', 'youtube', 'kick', 'discord', 'instagram',
+    'cmg', 'gankster', 'faceit', 'battlefy',
+    name='link_platform', create_type=False
 )
 
 
@@ -60,13 +62,29 @@ def upgrade() -> None:
     )
     op.execute('ALTER TABLE profiles ENABLE ROW LEVEL SECURITY')
 
+    # btree_gist lets the exclusion constraint below compare plain columns with = and <>.
+    # Supabase keeps extensions in the extensions schema. Left installed on downgrade.
+    op.execute('CREATE SCHEMA IF NOT EXISTS extensions')
+    op.execute('CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA extensions')
+
     op.create_table(
         'profile_links',
         sa.Column('profile_id', sa.Uuid(), nullable=False),
+        sa.Column('account_id', sa.Uuid(), nullable=False),
         sa.Column('platform', link_platform, nullable=False),
         sa.Column('handle', sa.String(), nullable=False),
+        sa.Column('canonical_handle', sa.String(), nullable=False),
         sa.PrimaryKeyConstraint('profile_id', 'platform', name='profile_links_pkey'),
-        sa.ForeignKeyConstraint(['profile_id'], ['profiles.id'], name='profile_links_profile_id_fkey', ondelete='CASCADE'),
+        # Two-column FK so account_id always matches the profile's real owner.
+        sa.ForeignKeyConstraint(
+            ['account_id', 'profile_id'], ['profiles.account_id', 'profiles.id'],
+            name='profile_links_profile_fkey', ondelete='CASCADE'
+        ),
+        # A handle can be linked by several profiles of the same account, but never by two accounts.
+        postgresql.ExcludeConstraint(
+            ('platform', '='), ('canonical_handle', '='), ('account_id', '<>'),
+            name='ex_profile_links_claimed', using='gist'
+        ),
     )
     op.execute('ALTER TABLE profile_links ENABLE ROW LEVEL SECURITY')
 

@@ -59,7 +59,12 @@ PUBLIC_ID_LENGTH = 10
 
 DETAIL_UPDATES = {"player": PlayerUpdate, "host": HostUpdate, "venue": VenueUpdate}
 GAME_ACCOUNT_LABELS = {"battlenet": "Battle.net", "activision": "Activision", "steam": "Steam", "riot": "Riot"}
+LINK_LABELS = {
+    "twitch": "Twitch", "twitter": "Twitter", "youtube": "YouTube", "kick": "Kick", "discord": "Discord",
+    "instagram": "Instagram", "cmg": "CMG", "gankster": "Gankster", "faceit": "FACEIT", "battlefy": "Battlefy"
+}
 _USERNAME_CONFLICT_RE = re.compile(r"\(type, canonical_username\)=\((\w+),")
+_LINK_CONFLICT_RE = re.compile(r"\(platform, canonical_handle, account_id\)=\((\w+),")
 
 profanity.load_censor_words()
 
@@ -86,6 +91,11 @@ def _raise_conflict(e: IntegrityError, action: str, profile_type: str | None = N
     if "uq_profiles_account_type" in message:
         raise HTTPException(status_code=409, detail=f"You already have a {profile_type or 'profile of that'} profile.")
 
+    if "ex_profile_links_claimed" in message:
+        match = _LINK_CONFLICT_RE.search(message)
+        label = LINK_LABELS.get(match.group(1), "linked") if match else "linked"
+        raise HTTPException(status_code=409, detail=f"That {label} account is already linked to another user.")
+
     if "users_pkey" in message:
         raise HTTPException(status_code=409, detail="Your profile is already set up.")
 
@@ -95,6 +105,9 @@ def _raise_conflict(e: IntegrityError, action: str, profile_type: str | None = N
 
     logger.exception("%s failed with unexpected integrity error.", action)
     raise HTTPException(status_code=409, detail=f"{action} conflicts with existing data.")
+
+def _canonical_handle(handle: str) -> str:
+    return unicodedata.normalize("NFKC", handle).casefold()
 
 def _new_public_id() -> str:
     return "".join(secrets.choice(PUBLIC_ID_ALPHABET) for _ in range(PUBLIC_ID_LENGTH))
@@ -120,7 +133,13 @@ def _build_profile(profile: ProfileIn, account_id: str, pfp_url: str | None) -> 
     )
 
     children: list[ProfileLinks | Players | Hosts | Venues] = [
-        ProfileLinks(profile_id = row.id, platform = platform, handle = handle)
+        ProfileLinks(
+            profile_id = row.id,
+            account_id = account_id,
+            platform = platform,
+            handle = handle,
+            canonical_handle = _canonical_handle(handle)
+        )
         for platform, handle in (profile.links or {}).items()
     ]
 
@@ -766,6 +785,56 @@ async def add_profile(
 
     return await get_profile_settings(user_id, profile.type, db)
 
+async def _apply_profile_changes(
+    user_id: str,
+    profile_id,
+    profile_type: ProfileType,
+    payload: dict,
+    links: dict | None,
+    details_values: dict | None,
+    db: AsyncSession
+) -> None:
+    """
+    The writes behind update_profile, without committing.
+    """
+
+    if payload:
+        await db.execute(update(Profiles).where(Profiles.id == profile_id).values(**payload))
+
+    if links is not None:
+        await db.execute(delete(ProfileLinks).where(ProfileLinks.profile_id == profile_id))
+
+        if links:
+            await db.execute(
+                insert(ProfileLinks),
+                [
+                    {
+                        "profile_id": profile_id,
+                        "account_id": user_id,
+                        "platform": platform,
+                        "handle": handle,
+                        "canonical_handle": _canonical_handle(handle)
+                    }
+                    for platform, handle in links.items()
+                ]
+            )
+
+    if details_values:
+        if profile_type == "venue":
+            # Keyed by name since (profile_id, venue_name) is the primary key.
+            unique_locations = {v["name"]: v["location"] for v in details_values["locations"]}
+
+            await db.execute(delete(Venues).where(Venues.profile_id == profile_id))
+            await db.execute(
+                insert(Venues),
+                [{"profile_id": profile_id, "venue_name": name, "location": location} for name, location in unique_locations.items()]
+            )
+        else:
+            table = Players if profile_type == "player" else Hosts
+            await db.execute(update(table).where(table.profile_id == profile_id).values(**details_values))
+
+    return None
+
 async def update_profile(user_id: str, profile_type: ProfileType, changes: ProfileUpdate, db: AsyncSession) -> ProfileSettingsOut:
     """
     Partially updates one of the user's profiles. Links and venue locations, when sent, are
@@ -789,33 +858,9 @@ async def update_profile(user_id: str, profile_type: ProfileType, changes: Profi
     profile = await _get_own_profile(user_id, profile_type, db)
     profile_id = profile.id
 
-    if payload:
-        await db.execute(update(Profiles).where(Profiles.id == profile_id).values(**payload))
-
-    if links is not None:
-        await db.execute(delete(ProfileLinks).where(ProfileLinks.profile_id == profile_id))
-
-        if links:
-            await db.execute(
-                insert(ProfileLinks),
-                [{"profile_id": profile_id, "platform": platform, "handle": handle} for platform, handle in links.items()]
-            )
-
-    if details_values:
-        if profile_type == "venue":
-            # Keyed by name since (profile_id, venue_name) is the primary key.
-            unique_locations = {v["name"]: v["location"] for v in details_values["locations"]}
-
-            await db.execute(delete(Venues).where(Venues.profile_id == profile_id))
-            await db.execute(
-                insert(Venues),
-                [{"profile_id": profile_id, "venue_name": name, "location": location} for name, location in unique_locations.items()]
-            )
-        else:
-            table = Players if profile_type == "player" else Hosts
-            await db.execute(update(table).where(table.profile_id == profile_id).values(**details_values))
-
+    # Constraints are checked as each statement runs, so the writes sit inside the try too.
     try:
+        await _apply_profile_changes(user_id, profile_id, profile_type, payload, links, details_values, db)
         await db.commit()
     except IntegrityError as e:
         await db.rollback()
@@ -890,11 +935,10 @@ async def change_username(user_id: str, profile_type: ProfileType, username: str
 
         await validate_username(username, openai, loc)
 
-    await db.execute(
-        update(Profiles).where(Profiles.id == profile_id).values(username = username.strip(), canonical_username = canonical)
-    )
-
     try:
+        await db.execute(
+            update(Profiles).where(Profiles.id == profile_id).values(username = username.strip(), canonical_username = canonical)
+        )
         await db.commit()
     except IntegrityError as e:
         await db.rollback()
