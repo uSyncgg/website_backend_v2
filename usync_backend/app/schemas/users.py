@@ -4,39 +4,17 @@ from datetime import date
 from pydantic import BaseModel, model_validator, ConfigDict, StringConstraints, Field, BeforeValidator, AfterValidator, PlainSerializer
 from typing import Any, Literal, ClassVar, Annotated
 
-PLAYER_FIELDS = {
-    "first_name",
-    "last_name",
-    "phone_number",
-    "gender",
-    "date_of_birth",
-    "country",
-    "interests",
-    "other_games",
-    "battlenet",
-    "activision",
-    "steam",
-    "riot",
-    "cmg",
-    "gankster",
-    "faceit",
-    "battlefly"
-}
-
-HOST_FIELDS = {
-    "hosted_games",
-    "other_hosted_games",
-    "organization",
-    "host_country",
-    "event_types"
-}
-
 NONEMPTYSTR = Annotated[str, StringConstraints(min_length=1)]
+
+ProfileType = Literal["player", "host", "venue"]
+LinkPlatform = Literal["twitch", "twitter", "youtube", "kick", "discord", "instagram"]
+PictureSource = Literal["upload", "copy_default"]
 
 # other_roles is a set (no duplicates) that leaves as a sorted list, so the
 # ARRAY column and API responses get a stable order. Requests only accept the
 # fixed choices; responses take whatever is stored so an old value can't 500.
-OtherRole = Literal["Coach", "Sponsor", "Team", "Viewer", "Venue", "Other"]
+# Venue isn't a choice: it's a profile type of its own.
+OtherRole = Literal["Coach", "Sponsor", "Team", "Viewer", "Other"]
 _SORTED = PlainSerializer(sorted, return_type=list[str])
 OtherRolesIn = Annotated[set[OtherRole], _SORTED]
 OtherRolesOut = Annotated[set[str], _SORTED]
@@ -72,38 +50,96 @@ def _check_birth_date_range(value: date | None) -> date | None:
 
 BirthDate = Annotated[date | None, BeforeValidator(_parse_birth_date), AfterValidator(_check_birth_date_range)]
 
-class PlayerDetails(BaseModel):
+def _blank_to_none(value: Any) -> Any:
+    if isinstance(value, str) and value.strip() == "":
+        return None
+
+    return value
+
+# Game account IDs are unique across players, so a blank one is stored as NULL (Postgres
+# allows any number of NULLs in a unique column, but only one "").
+GameAccount = Annotated[str | None, BeforeValidator(_blank_to_none)]
+
+class StrictIn(BaseModel):
     """
-    
+    Base for request bodies: unknown fields are a 422 and strings are trimmed.
     """
 
-    first_name: str
-    last_name: str
+    model_config = ConfigDict(extra = "forbid", str_strip_whitespace=True)
+
+class VenueIn(StrictIn):
+    """
+    One venue location. A venue profile's locations are replaced as a whole set on update.
+    """
+
+    name: NONEMPTYSTR
+    location: NONEMPTYSTR
+
+class PlayerDetails(StrictIn):
+    """
+    The details of a player profile, sent at sign up or when adding the profile.
+    """
+
+    first_name: NONEMPTYSTR
+    last_name: NONEMPTYSTR
     phone_number: str | None = None
     gender: str | None = None
     date_of_birth: BirthDate = None
     country: str | None = None
     interests: list[str] | None = None
     other_games: str | None = None
-    battlenet: str | None = None
-    activision: str | None = None
-    steam: str | None = None
-    riot: str | None = None
-    cmg: str | None = None
-    gankster: str | None = None
-    faceit: str | None = None
-    battlefly: str | None = None
+    battlenet: GameAccount = None
+    activision: GameAccount = None
+    steam: GameAccount = None
+    riot: GameAccount = None
 
-class HostDetails(BaseModel):
+class HostDetails(StrictIn):
     """
-    
+    The details of a host profile, sent at sign up or when adding the profile.
     """
 
     hosted_games: list[str] | None = None
     other_hosted_games: str | None = None
-    organization: str
-    host_country: str
+    organization: NONEMPTYSTR
+    host_country: NONEMPTYSTR
     event_types: list[str] | None = None
+
+class VenueDetails(StrictIn):
+    """
+    The details of a venue profile: its locations, at least one.
+    """
+
+    locations: list[VenueIn] = Field(min_length=1)
+
+class ProfileBase(StrictIn):
+    """
+    The fields every profile type shares. `picture` says where the profile picture comes from:
+    "upload" (a file sent alongside, named profile_picture_<type> at sign up), "copy_default"
+    (a copy of the default profile's picture, without moderating it again) or none.
+    """
+
+    username: str
+    picture: PictureSource | None = None
+    bio: str | None = None
+    bracket_hosting: bool = True
+    other_roles: OtherRolesIn | None = None
+    other_role_detail: str | None = None
+    links: dict[LinkPlatform, NONEMPTYSTR] | None = None
+
+class PlayerProfileIn(ProfileBase):
+    type: Literal["player"]
+    details: PlayerDetails
+
+class HostProfileIn(ProfileBase):
+    type: Literal["host"]
+    details: HostDetails
+
+class VenueProfileIn(ProfileBase):
+    type: Literal["venue"]
+    details: VenueDetails
+
+# `type` picks the model, so a player profile must send player details and so on.
+ProfileIn = Annotated[PlayerProfileIn | HostProfileIn | VenueProfileIn, Field(discriminator="type")]
 
 class RegistrationOut(BaseModel):
     """
@@ -112,138 +148,148 @@ class RegistrationOut(BaseModel):
 
     message: str
 
-class RegistrationIn(BaseModel):
+class RegistrationIn(StrictIn):
     """
-    Validation class for payload information for the /register endpoint.
+    Validation class for payload information for the /register endpoint: one entry per profile
+    the user is creating, and which of them is their default.
     """
 
-    email: str
-    username: str
-    signup_path: list[Literal["player", "host"]]
-    bio: str | None = None
-    twitch: str | None = None
-    twitter: str | None = None
-    youtube: str | None = None
-    kick: str | None = None
-    discord: str | None = None
-    instagram: str | None = None
-    bracket_hosting: bool | None = None
-    other_roles: OtherRolesIn | None = None
-    other_role_detail: str | None = None
-    venues: list[dict] | None = None
-    player: PlayerDetails | None = None
-    host: HostDetails | None = None
-
-    @model_validator(mode = "before")
-    @classmethod
-    def sort_payload(cls, data):
-        """
-        
-        """
-
-        if not isinstance(data, dict):
-            return data
-
-        data = dict(data)
-        roles = data.get("signup_path", [])
-
-        if "player" in roles:
-            data["player"] = {k: data.pop(k) for k in PLAYER_FIELDS if k in data}
-
-        if "host" in roles:
-            data["host"] = {k: data.pop(k) for k in HOST_FIELDS if k in data}
-
-        return data
+    default_profile: ProfileType
+    profiles: list[ProfileIn] = Field(min_length=1, max_length=3)
 
     @model_validator(mode = "after")
-    def check_roles(self):
+    def check_profiles(self):
         """
-        
+        One profile per type, the default must be one of them, and only other profiles can copy
+        the default's picture.
         """
 
-        if ("player" in self.signup_path) != (self.player is not None):
-            raise ValueError("player details required if 'player' is in sign up path")
+        types = [p.type for p in self.profiles]
 
-        if ("host" in self.signup_path) != (self.host is not None):
-            raise ValueError("host details required if 'host' is in sign up path")
+        if len(types) != len(set(types)):
+            raise ValueError("Only one profile of each type can be created.")
+
+        if self.default_profile not in types:
+            raise ValueError("The default profile must be one of the profiles being created.")
+
+        default = next(p for p in self.profiles if p.type == self.default_profile)
+
+        if default.picture == "copy_default":
+            raise ValueError("The default profile can't copy its own picture.")
+
+        if default.picture != "upload" and any(p.picture == "copy_default" for p in self.profiles):
+            raise ValueError("The default profile needs a picture for others to copy it.")
 
         return self
 
-class Profile(BaseModel):
+class ProfileSummary(BaseModel):
     """
-    
+    The minimum needed to show a profile in a list or link to it (/profile/<public_id>/<username>).
     """
 
+    type: ProfileType
     username: str
-    verified: bool
-    is_player: bool
-    is_host: bool
-    bio: str | None = None
-    other_roles: OtherRolesOut | None = None
-    other_role_detail: str | None = None
-    games: list[str] | None = None
-    organization: str | None = None
-    host_games: list[str] | None = None
-    event_types: list[str] | None = None
-    venues: list[dict] | None = None
+    public_id: str
     profile_picture: str | None = None
 
 class Me(BaseModel):
     """
-    Validation class for the response payload information for the /me endpoint.
+    Validation class for the response payload information for the /me endpoint: the navbar's
+    default profile and every profile on the account for the view switcher.
     """
 
-    username: str
-    profile_picture: str | None = None
+    verified: bool
+    default_profile: ProfileSummary | None = None
+    profiles: list[ProfileSummary] = []
 
-class ProfileSettingsOut(BaseModel):
+class VenueOut(BaseModel):
+    name: str
+    location: str
+
+class PlayerPublic(BaseModel):
+    games: list[str] = []
+
+class HostPublic(BaseModel):
+    organization: str
+    hosted_games: list[str] = []
+    event_types: list[str] = []
+
+class VenuePublic(BaseModel):
+    locations: list[VenueOut] = []
+
+class Profile(BaseModel):
     """
-    
+    A public profile page. `others` lists the account's other profiles (from the profiles table
+    only); their details are fetched when the viewer switches to one.
     """
 
-    model_config = ConfigDict(validate_assignment=True)
-
+    public_id: str
+    type: ProfileType
     username: str
     verified: bool
-    is_player: bool
-    is_host: bool
     bio: str | None = None
-    bracket_hosting: bool
+    profile_picture: str | None = None
     other_roles: OtherRolesOut = set()
     other_role_detail: str | None = None
-    profile_picture: str | None = None
+    links: dict[str, str] = {}
+    details: PlayerPublic | HostPublic | VenuePublic
+    others: list[ProfileSummary] = []
 
-    interests: list[str] = []
-    other_games: str | None = None
-    first_name: str | None = None
-    last_name: str | None = None
+class PlayerSettings(BaseModel):
+    first_name: str
+    last_name: str
     phone_number: str | None = None
     gender: str | None = None
     date_of_birth: date | None = None
     country: str | None = None
+    interests: list[str] = []
+    other_games: str | None = None
+    battlenet: str | None = None
+    activision: str | None = None
+    steam: str | None = None
+    riot: str | None = None
 
-    organization: str | None = None
+class HostSettings(BaseModel):
+    organization: str
     hosted_games: list[str] = []
     other_hosted_games: str | None = None
-    host_country: str | None = None
+    host_country: str
     event_types: list[str] = []
 
-    venues: list[dict] = []
+class VenueSettings(BaseModel):
+    locations: list[VenueOut] = []
 
-class Updater(BaseModel):
+class ProfileSettingsOut(BaseModel):
     """
-    
+    Everything the owner can edit on one of their profiles.
+    """
+
+    public_id: str
+    type: ProfileType
+    username: str
+    verified: bool
+    is_default: bool
+    bio: str | None = None
+    profile_picture: str | None = None
+    bracket_hosting: bool
+    other_roles: OtherRolesOut = set()
+    other_role_detail: str | None = None
+    links: dict[str, str] = {}
+    details: PlayerSettings | HostSettings | VenueSettings
+
+class Updater(StrictIn):
+    """
+    Base for partial updates. Fields listed in never_null can't be cleared, so a null for one
+    of them is dropped (treated as "not sent").
     """
 
     never_null: ClassVar[set[str]] = set()
-
-    model_config = ConfigDict(extra = "forbid", str_strip_whitespace=True)
 
     @model_validator(mode="before")
     @classmethod
     def check_fields(cls, data) -> Any:
         """
-        
+
         """
 
         if not isinstance(data, dict):
@@ -257,50 +303,14 @@ class Updater(BaseModel):
 
         return data
 
-class VenueIn(BaseModel):
-    """
-    One venue entry. Venues are replaced as a whole set on update.
-    """
-
-    model_config = ConfigDict(extra = "forbid", str_strip_whitespace=True)
-
-    name: NONEMPTYSTR
-    location: NONEMPTYSTR
-
-class UserUpdate(Updater):
-    """
-    
-    """
-
-    never_null: ClassVar[set[str]] = {
-        "bracket_hosting",
-        "venues"
-    }
-
-    bio: str | None = None
-    twitch: str | None = None
-    twitter: str | None = None
-    youtube: str | None = None
-    kick: str | None = None
-    discord: str | None = None
-    instagram: str | None = None
-    bracket_hosting: bool | None = None
-    other_roles: OtherRolesIn | None = None
-    other_role_detail: str | None = None
-    venues: list[VenueIn] | None = None
-
 class PlayerUpdate(Updater):
     """
-    
+
     """
 
     never_null: ClassVar[set[str]] = {
         "first_name",
-        "last_name",
-        "activision",
-        "battlenet",
-        "steam",
-        "riot"
+        "last_name"
     }
 
     first_name: NONEMPTYSTR | None = None
@@ -311,14 +321,14 @@ class PlayerUpdate(Updater):
     country: str | None = None
     interests: list[str] | None = Field(default=None, serialization_alias="games")
     other_games: str | None = None
-    battlenet: str | None = None
-    activision: str | None = None
-    steam: str | None = None
-    riot: str | None = None
+    battlenet: GameAccount = None
+    activision: GameAccount = None
+    steam: GameAccount = None
+    riot: GameAccount = None
 
 class HostUpdate(Updater):
     """
-    
+
     """
 
     never_null: ClassVar[set[str]] = {
@@ -332,14 +342,49 @@ class HostUpdate(Updater):
     host_country: NONEMPTYSTR | None = None
     event_types: list[str] | None = None
 
-class UsernameUpdate(BaseModel):
-    """
-    Validation class for payload information for the /me/username endpoint.
+class VenueUpdate(Updater):
     """
 
-    model_config = ConfigDict(extra = "forbid")
+    """
+
+    never_null: ClassVar[set[str]] = {
+        "locations"
+    }
+
+    locations: list[VenueIn] | None = Field(default=None, min_length=1)
+
+class ProfileUpdate(Updater):
+    """
+    Partial update of one of the user's profiles. `links`, when sent, replaces the whole set.
+    `details` is checked against the profile's type (PlayerUpdate, HostUpdate or VenueUpdate).
+    """
+
+    never_null: ClassVar[set[str]] = {
+        "bracket_hosting",
+        "links",
+        "details"
+    }
+
+    bio: str | None = None
+    bracket_hosting: bool | None = None
+    other_roles: OtherRolesIn | None = None
+    other_role_detail: str | None = None
+    links: dict[LinkPlatform, NONEMPTYSTR] | None = None
+    details: dict[str, Any] | None = None
+
+class UsernameUpdate(StrictIn):
+    """
+    Validation class for payload information for the PATCH /me/profiles/{type}/username endpoint.
+    """
 
     username: str
+
+class DefaultProfileUpdate(StrictIn):
+    """
+    Validation class for payload information for the PATCH /me/default-profile endpoint.
+    """
+
+    type: ProfileType
 
 class UpdateProfileIn(BaseModel):
     """
@@ -354,4 +399,3 @@ class UpdateProfileOut(BaseModel):
     """
 
     message: str
-    
