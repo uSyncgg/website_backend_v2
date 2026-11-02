@@ -958,6 +958,48 @@ async def set_default_profile(user_id: str, profile_type: ProfileType, db: Async
 
     return await get_me(user_id, db)
 
+async def delete_profile(user_id: str, profile_type: ProfileType, db: AsyncSession, supabase: AsyncClient) -> Me:
+    """
+    Deletes one of the user's profiles. Removing the profiles row cascades to its players/hosts/
+    venues details, links and comp site accounts. The account's only profile can't be deleted
+    (409, delete the account instead). If it was the default, the oldest remaining profile
+    becomes the default first, since the default_profile FK won't let it point at a deleted row.
+    """
+
+    # Lock the account row so two deletes at once can't both pass the "not the last profile"
+    # check and leave the account with no profiles.
+    result = await db.execute(select(UsersParent).where(UsersParent.id == user_id).with_for_update())
+    user = result.scalars().first()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="Profile not found.")
+
+    profile = await _get_own_profile(user_id, profile_type, db)
+    remaining = [p for p in await _account_profiles(user_id, db) if p.id != profile.id]
+
+    if not remaining:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="You can't delete your only profile. Delete your account instead."
+        )
+
+    if user.default_profile_id == profile.id:
+        # _account_profiles is ordered oldest first.
+        await db.execute(
+            update(UsersParent).where(UsersParent.id == user_id).values(default_profile_id = remaining[0].id)
+        )
+
+    pfp_path = _storage_path(profile.profile_picture) if profile.profile_picture else None
+
+    await db.execute(delete(Profiles).where(Profiles.id == profile.id).where(Profiles.account_id == user_id))
+    await db.commit()
+
+    # After the commit, so a failed delete never leaves a profile without its picture.
+    await _remove_pfps([pfp_path] if pfp_path else [], supabase)
+
+    return await get_me(user_id, db)
+
 def _storage_path(pfp_url: str) -> str | None:
     """
     Turns a profile_pictures public URL back into its storage path (<user_id>/<uuid>.webp).
