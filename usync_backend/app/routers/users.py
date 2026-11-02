@@ -25,6 +25,7 @@ from app.services.users import (
     update_profile_picture,
     change_username,
     set_default_profile,
+    delete_profile,
     delete_account
 )
 from pydantic import TypeAdapter, ValidationError
@@ -200,6 +201,23 @@ async def updateDefaultProfile(
     """
 
     return await set_default_profile(claims["sub"], body.type, db)
+
+@router.delete("/me/profiles/{profile_type}", response_model = Me)
+@limiter.limit(MODERATE)
+async def deleteProfile(
+    request: Request,
+    response: Response,
+    profile_type: ProfileType,
+    db: AsyncSession = Depends(get_db),
+    supabase: AsyncClient = Depends(get_supabase),
+    claims: dict = Depends(verify_supabase_jwt)
+):
+    """
+    Deletes one of the signed in user's profiles and returns the updated /me. 404 if they don't
+    have that type, 409 if it's their only profile. Deleting the default promotes the oldest remaining profile.
+    """
+
+    return await delete_profile(claims["sub"], profile_type, db, supabase)
 
 @router.delete("/me", status_code = 204)
 @limiter.limit(STRICT_ACCOUNT_DELETE)
