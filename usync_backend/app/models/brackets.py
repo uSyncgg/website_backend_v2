@@ -7,6 +7,7 @@ from sqlalchemy import ForeignKey, ForeignKeyConstraint, String, DateTime, Index
 from sqlalchemy.dialects.postgresql import ARRAY, ENUM, JSONB
 
 # The enum types are created by the migration, so the models never try to create them.
+BRACKET_EVENT_TYPE = ENUM("league", "lan", "wager", "h2h", name = "bracket_event_type", create_type = False)
 BRACKET_FORMAT = ENUM("single_elim", "double_elim", "round_robin", name = "bracket_format", create_type = False)
 BRACKET_LOCATION = ENUM("online", "in_person", name = "bracket_location", create_type = False)
 BRACKET_DECISION = ENUM("host", "players", "forfeit", "cleared", name = "bracket_decision", create_type = False)
@@ -29,6 +30,9 @@ class BracketEvents(Base):
     account_id: Mapped[uuid.UUID] = mapped_column(index = True)
     host_profile_id: Mapped[uuid.UUID] = mapped_column(index = True)
     name: Mapped[str] = mapped_column(String(80))
+    # Which section of the site it belongs to, like the listings: league, LAN, wager or
+    # head-to-head. LANs are always in person.
+    event_type: Mapped[str] = mapped_column(BRACKET_EVENT_TYPE)
     game: Mapped[str] = mapped_column()
     format: Mapped[str] = mapped_column(BRACKET_FORMAT)
     # Players per side: 1 for 1v1 up to 5 for 5v5. Team events register a team name and captain.
@@ -71,6 +75,7 @@ class BracketEvents(Base):
         CheckConstraint("max_entrants IS NULL OR max_entrants >= 2", name = "ck_bracket_events_max_entrants"),
         CheckConstraint("no_show_minutes IS NULL OR no_show_minutes >= 0", name = "ck_bracket_events_no_show_minutes"),
         CheckConstraint("location_type = 'online' OR venue IS NOT NULL", name = "ck_bracket_events_venue"),
+        CheckConstraint("event_type <> 'lan' OR location_type = 'in_person'", name = "ck_bracket_events_lan_in_person"),
         CheckConstraint("NOT payments_enabled OR notify_email IS NOT NULL", name = "ck_bracket_events_notify_email"),
     )
 

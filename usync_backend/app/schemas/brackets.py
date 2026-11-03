@@ -5,11 +5,14 @@ from datetime import datetime
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from app.schemas.users import ProfileSummary
+from app.services import GAMES
 
-# What the host's "Create an event" form offers (frontend pages/Host/hostShared.js and CreateEvent.js).
-BRACKET_GAMES = ("Call of Duty", "CS 2", "Halo", "League of Legends", "Rocket League", "Valorant", "Warzone", "Other")
+# Events are for the site's supported titles only (no "Other"), the same list the frontend form offers.
+BRACKET_GAMES = tuple(GAMES)
 PLAYER_FIELD_OPTIONS = ("Activision ID", "Riot ID", "Epic ID", "Steam", "Battle.net", "Xbox Gamertag", "PSN", "Discord", "Twitter / X")
 
+# Same as the site's sections (and ProfileEvent.kind for listed events).
+BracketEventType = Literal["league", "lan", "wager", "h2h"]
 BracketFormat = Literal["single_elim", "double_elim", "round_robin"]
 BracketLocation = Literal["online", "in_person"]
 BracketStage = Literal["registration", "closed", "seeding", "live", "complete"]
@@ -133,6 +136,7 @@ class BracketEventIn(BracketEventFields):
     """
 
     host_profile: str
+    event_type: BracketEventType
     format: BracketFormat = "single_elim"
     team_size: int = Field(default = 1, ge = 1, le = 5)
     starts_at: datetime
@@ -141,6 +145,8 @@ class BracketEventIn(BracketEventFields):
 
     @model_validator(mode = "after")
     def venue_for_lans(self):
+        if self.event_type == "lan" and self.location_type != "in_person":
+            raise ValueError("LANs are held in person.")
         if self.location_type == "in_person" and not self.venue:
             raise ValueError("Add where the event is held.")
         return self
@@ -152,6 +158,7 @@ class BracketEventUpdate(BracketEventFields):
     """
 
     name: str | None = Field(default = None, min_length = 1, max_length = 80)
+    event_type: BracketEventType | None = None
     game: str | None = None
     best_of: Literal[1, 3, 5, 7] | None = None
     location_type: BracketLocation | None = None
@@ -343,6 +350,7 @@ class BracketEventOut(BaseModel):
     id: uuid.UUID
     host_profile: ProfileSummary
     name: str
+    event_type: BracketEventType
     game: str
     format: BracketFormat
     team_size: int
@@ -377,6 +385,7 @@ class BracketEventSummary(BaseModel):
     id: uuid.UUID
     host_profile: ProfileSummary
     name: str
+    event_type: BracketEventType
     game: str
     format: BracketFormat
     team_size: int

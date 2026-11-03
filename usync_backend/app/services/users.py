@@ -650,6 +650,7 @@ async def get_profile_events(public_id: str, db: AsyncSession) -> list[ProfileEv
     events: list[ProfileEvent] = [
         ProfileEvent(
             kind = "bracket",
+            event_type = row.event_type,
             name = row.name,
             game = row.game,
             path = f"/brackets/{row.event_id}",

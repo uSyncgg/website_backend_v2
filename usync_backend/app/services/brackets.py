@@ -233,6 +233,7 @@ async def get_bracket_event(event_id: uuid.UUID, viewer_id: str | None, db: Asyn
         id = event.event_id,
         host_profile = _summary(profile),
         name = event.name,
+        event_type = event.event_type,
         game = event.game,
         format = event.format,
         team_size = event.team_size,
@@ -290,6 +291,7 @@ async def list_hosted_events(account_id: str, db: AsyncSession) -> list[BracketE
             id = event.event_id,
             host_profile = _summary(profile),
             name = event.name,
+            event_type = event.event_type,
             game = event.game,
             format = event.format,
             team_size = event.team_size,
@@ -321,6 +323,7 @@ async def create_bracket_event(payload: BracketEventIn, account_id: str, db: Asy
         account_id = profile.account_id,
         host_profile_id = profile.id,
         name = payload.name,
+        event_type = payload.event_type,
         game = payload.game,
         format = payload.format,
         team_size = payload.team_size,
@@ -374,8 +377,11 @@ async def update_bracket_event(event_id: uuid.UUID, payload: BracketEventUpdate,
         if changes["max_entrants"] < held:
             raise HTTPException(status_code = 409, detail = f"{held} have already signed up, so the cap can't go below that.")
 
-    location = changes.get("location_type", event.location_type)
+    event_type = changes.get("event_type") or event.event_type
+    location = changes.get("location_type") or event.location_type
     venue = changes.get("venue", event.venue)
+    if event_type == "lan" and location != "in_person":
+        raise HTTPException(status_code = 422, detail = "LANs are held in person.")
     if location == "in_person" and not venue:
         raise HTTPException(status_code = 422, detail = "Add where the event is held.")
     if location == "online":

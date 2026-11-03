@@ -234,6 +234,8 @@ class ProfileEvent(BaseModel):
     """
 
     kind: Literal["lan", "league", "wager", "h2h", "bracket"]
+    # For bracket events: which kind of event the host posted it as (league, lan, wager, h2h).
+    event_type: Literal["lan", "league", "wager", "h2h"] | None = None
     name: str
     game: str
     path: str

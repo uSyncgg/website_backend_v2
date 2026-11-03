@@ -18,6 +18,7 @@ down_revision: Union[str, Sequence[str], None] = 'a7c3e1b9d2f4'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
+BRACKET_EVENT_TYPE = postgresql.ENUM("league", "lan", "wager", "h2h", name = "bracket_event_type", create_type = False)
 BRACKET_FORMAT = postgresql.ENUM("single_elim", "double_elim", "round_robin", name = "bracket_format", create_type = False)
 BRACKET_LOCATION = postgresql.ENUM("online", "in_person", name = "bracket_location", create_type = False)
 BRACKET_DECISION = postgresql.ENUM("host", "players", "forfeit", "cleared", name = "bracket_decision", create_type = False)
@@ -27,7 +28,7 @@ def _now():
 
 def upgrade() -> None:
     """Upgrade schema."""
-    for enum in (BRACKET_FORMAT, BRACKET_LOCATION, BRACKET_DECISION):
+    for enum in (BRACKET_EVENT_TYPE, BRACKET_FORMAT, BRACKET_LOCATION, BRACKET_DECISION):
         enum.create(op.get_bind(), checkfirst = True)
 
     op.create_table(
@@ -36,6 +37,7 @@ def upgrade() -> None:
         sa.Column("account_id", sa.Uuid(), nullable = False),
         sa.Column("host_profile_id", sa.Uuid(), nullable = False),
         sa.Column("name", sa.String(80), nullable = False),
+        sa.Column("event_type", BRACKET_EVENT_TYPE, nullable = False),
         sa.Column("game", sa.String(), nullable = False),
         sa.Column("format", BRACKET_FORMAT, nullable = False),
         sa.Column("team_size", sa.SmallInteger(), nullable = False),
@@ -65,6 +67,7 @@ def upgrade() -> None:
         sa.CheckConstraint("max_entrants IS NULL OR max_entrants >= 2", name = "ck_bracket_events_max_entrants"),
         sa.CheckConstraint("no_show_minutes IS NULL OR no_show_minutes >= 0", name = "ck_bracket_events_no_show_minutes"),
         sa.CheckConstraint("location_type = 'online' OR venue IS NOT NULL", name = "ck_bracket_events_venue"),
+        sa.CheckConstraint("event_type <> 'lan' OR location_type = 'in_person'", name = "ck_bracket_events_lan_in_person"),
         sa.CheckConstraint("NOT payments_enabled OR notify_email IS NOT NULL", name = "ck_bracket_events_notify_email"),
     )
     op.create_index("ix_bracket_events_host_profile_id", "bracket_events", ["host_profile_id"])
@@ -193,5 +196,5 @@ def downgrade() -> None:
         "DELETE FROM event_pass_tiers WHERE event_id IN (SELECT id FROM events WHERE event_type = 'bracket_events')"
     )
     op.execute("DELETE FROM events WHERE event_type = 'bracket_events'")
-    for enum in (BRACKET_DECISION, BRACKET_LOCATION, BRACKET_FORMAT):
+    for enum in (BRACKET_DECISION, BRACKET_LOCATION, BRACKET_FORMAT, BRACKET_EVENT_TYPE):
         enum.drop(op.get_bind(), checkfirst = True)
