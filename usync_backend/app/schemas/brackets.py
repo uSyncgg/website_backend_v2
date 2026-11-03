@@ -383,7 +383,7 @@ class BracketEventOut(BaseModel):
 
 class BracketEventSummary(BaseModel):
     """
-    A row on the Host Dashboard.
+    A row on the Event Dashboard's Hosting tab.
     """
 
     id: uuid.UUID
@@ -398,3 +398,15 @@ class BracketEventSummary(BaseModel):
     entrant_count: int
     max_entrants: int | None
     created_at: datetime
+
+class EnteredEventSummary(BracketEventSummary):
+    """
+    A row on the Event Dashboard's Entered tab: the event, plus how you're entered in it.
+    """
+
+    entrant_id: uuid.UUID
+    entered_as: str
+    checked_in: bool
+    check_in_required: bool
+    # 'free', or the registration's payment_status for paid sign-ups.
+    payment_status: str

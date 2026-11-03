@@ -11,6 +11,7 @@ from app.schemas.brackets import (
     BracketEventUpdate,
     CheckInIn,
     DelayIn,
+    EnteredEventSummary,
     HostEntrantIn,
     HostResultIn,
     RegistrationIn,
@@ -31,10 +32,18 @@ router = APIRouter(prefix = "/brackets", tags = ["Brackets"])
 @router.get("/hosted", response_model = list[BracketEventSummary])
 async def hostedEvents(claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
     """
-    The Host Dashboard: every bracket event the signed-in account posted.
+    The Event Dashboard's Hosting tab: every bracket event the signed-in account posted.
     """
 
     return await service.list_hosted_events(claims["sub"], db)
+
+@router.get("/entered", response_model = list[EnteredEventSummary])
+async def enteredEvents(claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
+    """
+    The Event Dashboard's Entered tab: every bracket event the signed-in account is signed up for.
+    """
+
+    return await service.list_entered_events(claims["sub"], db)
 
 @router.post("", response_model = BracketEventOut, status_code = 201)
 @limiter.limit(STRICT_FORM_SUBMISSION)

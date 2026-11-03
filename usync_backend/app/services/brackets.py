@@ -27,6 +27,7 @@ from app.schemas.brackets import (
     BracketEventOut,
     BracketEventSummary,
     BracketOut,
+    EnteredEventSummary,
     DelayIn,
     DelayOut,
     EntrantHost,
@@ -273,36 +274,62 @@ async def get_managed_event(event_id: uuid.UUID, account_id: str, db: AsyncSessi
     await _owned_event(event_id, account_id, db)
     return await get_bracket_event(event_id, account_id, db, host_view = True)
 
+async def _summary_fields(event: BracketEvents, db: AsyncSession) -> dict:
+    profile = await db.get(Profiles, event.host_profile_id)
+    entrants = await _entrants(event.event_id, db)
+    bracket, results, _, _ = await _bracket_state(event.event_id, db)
+    return dict(
+        id = event.event_id,
+        host_profile = _summary(profile),
+        name = event.name,
+        event_type = event.event_type,
+        game = event.game,
+        format = event.format,
+        team_size = event.team_size,
+        starts_at = event.starts_at,
+        stage = _stage(event, bracket, results),
+        entrant_count = sum(_holds_spot(e, s) for e, s in entrants),
+        max_entrants = event.max_entrants,
+        created_at = event.created_at,
+    )
+
+async def list_entered_events(account_id: str, db: AsyncSession) -> list[EnteredEventSummary]:
+    """
+    The Event Dashboard's Entered tab: every bracket event the account is signed up for (paid
+    sign-ups still waiting on payment included; failed or canceled ones not), soonest first.
+    """
+
+    rows = (await db.execute(
+        select(BracketEntrants, BracketEvents, EventRegistrations.payment_status)
+        .join(BracketEvents, BracketEvents.event_id == BracketEntrants.event_id)
+        .outerjoin(EventRegistrations, EventRegistrations.id == BracketEntrants.registration_id)
+        .where(BracketEntrants.account_id == account_id)
+        .order_by(BracketEvents.starts_at)
+    )).all()
+
+    return [
+        EnteredEventSummary(
+            **await _summary_fields(event, db),
+            entrant_id = entrant.id,
+            entered_as = entrant.name,
+            checked_in = entrant.checked_in,
+            check_in_required = event.check_in_required,
+            payment_status = status or "free",
+        )
+        for entrant, event, status in rows if _holds_spot(entrant, status)
+    ]
+
 async def list_hosted_events(account_id: str, db: AsyncSession) -> list[BracketEventSummary]:
     """
-    The Host Dashboard: every bracket event the account posted, from any of its profiles,
-    newest first.
+    The Event Dashboard's Hosting tab: every bracket event the account posted, from any of its
+    profiles, newest first.
     """
 
     events = (await db.execute(
         select(BracketEvents).where(BracketEvents.account_id == account_id).order_by(BracketEvents.created_at.desc())
     )).scalars().all()
 
-    out = []
-    for event in events:
-        profile = await db.get(Profiles, event.host_profile_id)
-        entrants = await _entrants(event.event_id, db)
-        bracket, results, _, _ = await _bracket_state(event.event_id, db)
-        out.append(BracketEventSummary(
-            id = event.event_id,
-            host_profile = _summary(profile),
-            name = event.name,
-            event_type = event.event_type,
-            game = event.game,
-            format = event.format,
-            team_size = event.team_size,
-            starts_at = event.starts_at,
-            stage = _stage(event, bracket, results),
-            entrant_count = sum(_holds_spot(e, s) for e, s in entrants),
-            max_entrants = event.max_entrants,
-            created_at = event.created_at,
-        ))
-    return out
+    return [BracketEventSummary(**await _summary_fields(event, db)) for event in events]
 
 # ---- host: the event ---------------------------------------------------------
 
