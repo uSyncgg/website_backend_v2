@@ -2,70 +2,76 @@ from fastapi import APIRouter, Depends, File, Form, UploadFile, HTTPException, R
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.dependencies import get_db, verify_supabase_jwt, get_supabase, get_openai
 from app.core.limiter import limiter, STRICT_REGISTER, STRICT_USERNAME_CHECK, STRICT_ACCOUNT_CHANGE, STRICT_ACCOUNT_DELETE, MODERATE
-from app.schemas.users import RegistrationIn, RegistrationOut, Profile, Me, ProfileSettingsOut, UserUpdate, PlayerUpdate, HostUpdate, UsernameUpdate
+from app.schemas.users import (
+    RegistrationIn,
+    RegistrationOut,
+    ProfileIn,
+    ProfileType,
+    Profile,
+    Me,
+    ProfileSettingsOut,
+    ProfileUpdate,
+    UsernameUpdate,
+    DefaultProfileUpdate
+)
 from app.services.users import (
-    handle_registration, 
-    process_pfp, 
-    check_valid_username, 
-    get_profile, 
-    get_me, 
+    handle_registration,
+    check_valid_username,
+    get_profile,
+    get_me,
     get_profile_settings,
-    update_profile_section,
+    add_profile,
+    update_profile,
     update_profile_picture,
     change_username,
+    set_default_profile,
+    delete_profile,
     delete_account
 )
-from app.models.users import UsersParent, Players, Hosts
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 from supabase import AsyncClient
 from openai import AsyncOpenAI
 
 router = APIRouter(prefix="/users", tags=["Users"])
+
+_profile_in = TypeAdapter(ProfileIn)
 
 @router.post("/register", response_model=RegistrationOut)
 @limiter.limit(STRICT_REGISTER)
 async def registerUser(
     request: Request,
     response: Response,
-    data: str = Form(...), 
-    profile_picture: UploadFile | None = File(None), 
-    claims: dict = Depends(verify_supabase_jwt), 
-    db: AsyncSession = Depends(get_db), 
+    data: str = Form(...),
+    profile_picture_player: UploadFile | None = File(None),
+    profile_picture_host: UploadFile | None = File(None),
+    profile_picture_venue: UploadFile | None = File(None),
+    claims: dict = Depends(verify_supabase_jwt),
+    db: AsyncSession = Depends(get_db),
     supabase: AsyncClient = Depends(get_supabase),
     openai: AsyncOpenAI = Depends(get_openai)
 ):
     """
-    Calls functionality to register a user.
+    Creates the signed in user's account and one profile per entry in `data`. Each profile set
+    to upload a picture sends it as profile_picture_<type>.
     """
-
-    user_id = claims["sub"]
-    email = claims["email"]
-    pfp_url = ""
-    pfp_path = ""
 
     try:
         payload = RegistrationIn.model_validate_json(data)
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=e.errors(include_context=False))
 
-    await check_valid_username(
-        payload.username, 
-        db, 
-        openai,
-        ("body", "username"),
-        True if "player" in payload.signup_path else False,
-        True if "host" in payload.signup_path else False
-    )
+    files = {
+        "player": profile_picture_player,
+        "host": profile_picture_host,
+        "venue": profile_picture_venue
+    }
 
-    if profile_picture:
-        pfp_url, pfp_path = await process_pfp(profile_picture, supabase, user_id, openai)
-
-    return await handle_registration(payload, email, pfp_url, pfp_path, user_id, db, supabase)
+    return await handle_registration(payload, files, claims["email"], claims["sub"], db, supabase, openai)
 
 @router.get("/me", response_model=Me)
 async def getMe(claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
     """
-    Returns the signed in user's username and profile picture, or a 404 if their profile is incomplete.
+    Returns the signed in user's default profile and all their profiles, or a 404 if sign up isn't complete.
     """
 
     return await get_me(claims["sub"], db)
@@ -73,94 +79,102 @@ async def getMe(claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = 
 @router.get("/check/{username}")
 @limiter.limit(STRICT_USERNAME_CHECK)
 async def checkUsername(
-    request: Request, 
-    response: Response, 
-    username: str, 
-    player: bool | None = None, 
-    host: bool | None = None, 
-    db: AsyncSession = Depends(get_db), 
+    request: Request,
+    response: Response,
+    username: str,
+    type: ProfileType,
+    db: AsyncSession = Depends(get_db),
     openai: AsyncOpenAI = Depends(get_openai)
 ):
     """
-    
+    Checks a username against the rules and against other profiles of the same type.
     """
 
-    return await check_valid_username(username, db, openai, ("path", "username"), player, host)
+    return await check_valid_username(username, type, db, openai, ("path", "username"))
 
-@router.get("/fetch/{username}/profile", response_model = Profile)
-async def getProfile(username: str, db: AsyncSession = Depends(get_db)):
+@router.get("/profiles/{public_id}", response_model = Profile)
+async def getProfile(public_id: str, db: AsyncSession = Depends(get_db)):
     """
-    
-    """
-
-    return await get_profile(username, db)
-
-@router.get("/me/settings", response_model = ProfileSettingsOut)
-async def getProfileSettings(request: Request, response: Response, db: AsyncSession = Depends(get_db), claims: dict = Depends(verify_supabase_jwt)):
-    """
-    
+    Returns a public profile and a list of the account's other profiles to switch to.
     """
 
-    user_id = claims["sub"]
+    return await get_profile(public_id, db)
 
-    return await get_profile_settings(user_id, db)
-
-@router.patch("/me/user", response_model = ProfileSettingsOut)
-@limiter.limit(MODERATE)
-async def updateUser(
-    request: Request, 
-    response: Response, 
-    user: UserUpdate, 
-    db: AsyncSession = Depends(get_db), 
-    claims: dict = Depends(verify_supabase_jwt)
-):
-    """
-    Partially updates the signed in user's users row (and replaces their venues if sent).
-    """
-
-    payload = user.model_dump(exclude_unset=True, by_alias=True)
-
-    return await update_profile_section(claims["sub"], UsersParent, payload, db)
-
-@router.patch("/me/player", response_model = ProfileSettingsOut)
-@limiter.limit(MODERATE)
-async def updatePlayer(
-    request: Request,
-    response: Response,
-    player: PlayerUpdate,
+@router.get("/me/profiles/{profile_type}", response_model = ProfileSettingsOut)
+async def getProfileSettings(
+    profile_type: ProfileType,
     db: AsyncSession = Depends(get_db),
     claims: dict = Depends(verify_supabase_jwt)
 ):
     """
-    Partially updates the signed in user's players row. 404 if they aren't a player.
+    Returns everything the signed in user can edit on one of their profiles.
     """
 
-    payload = player.model_dump(exclude_unset=True, by_alias=True)
+    return await get_profile_settings(claims["sub"], profile_type, db)
 
-    return await update_profile_section(claims["sub"], Players, payload, db)
-
-@router.patch("/me/host", response_model = ProfileSettingsOut)
-@limiter.limit(MODERATE)
-async def updateHost(
+@router.post("/me/profiles", response_model = ProfileSettingsOut)
+@limiter.limit(STRICT_ACCOUNT_CHANGE)
+async def addProfile(
     request: Request,
     response: Response,
-    host: HostUpdate,
+    data: str = Form(...),
+    profile_picture: UploadFile | None = File(None),
+    db: AsyncSession = Depends(get_db),
+    supabase: AsyncClient = Depends(get_supabase),
+    openai: AsyncOpenAI = Depends(get_openai),
+    claims: dict = Depends(verify_supabase_jwt)
+):
+    """
+    Adds a profile of a new type (player, host or venue) to the signed in user's account.
+    409 if they already have one of that type or the username is taken.
+    """
+
+    try:
+        profile = _profile_in.validate_json(data)
+    except ValidationError as e:
+        raise HTTPException(status_code=422, detail=e.errors(include_context=False))
+
+    return await add_profile(claims["sub"], profile, profile_picture, db, supabase, openai)
+
+@router.patch("/me/profiles/{profile_type}", response_model = ProfileSettingsOut)
+@limiter.limit(MODERATE)
+async def updateProfile(
+    request: Request,
+    response: Response,
+    profile_type: ProfileType,
+    changes: ProfileUpdate,
     db: AsyncSession = Depends(get_db),
     claims: dict = Depends(verify_supabase_jwt)
 ):
     """
-    Partially updates the signed in user's hosts row. 404 if they aren't a host.
+    Partially updates one of the signed in user's profiles. 404 if they don't have that type.
     """
 
-    payload = host.model_dump(exclude_unset=True, by_alias=True)
+    return await update_profile(claims["sub"], profile_type, changes, db)
 
-    return await update_profile_section(claims["sub"], Hosts, payload, db)
+@router.patch("/me/profiles/{profile_type}/username", response_model = ProfileSettingsOut)
+@limiter.limit(STRICT_ACCOUNT_CHANGE)
+async def updateUsername(
+    request: Request,
+    response: Response,
+    profile_type: ProfileType,
+    body: UsernameUpdate,
+    db: AsyncSession = Depends(get_db),
+    openai: AsyncOpenAI = Depends(get_openai),
+    claims: dict = Depends(verify_supabase_jwt)
+):
+    """
+    Renames one of the signed in user's profiles, using the same rules as sign up.
+    """
 
-@router.put("/me/profile-picture", response_model = Me)
+    return await change_username(claims["sub"], profile_type, body.username, db, openai)
+
+@router.put("/me/profiles/{profile_type}/profile-picture", response_model = ProfileSettingsOut)
 @limiter.limit(STRICT_ACCOUNT_CHANGE)
 async def updateProfilePicture(
     request: Request,
     response: Response,
+    profile_type: ProfileType,
     profile_picture: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
     supabase: AsyncClient = Depends(get_supabase),
@@ -168,26 +182,42 @@ async def updateProfilePicture(
     claims: dict = Depends(verify_supabase_jwt)
 ):
     """
-    Replaces the signed in user's profile picture.
+    Replaces one of the signed in user's profile pictures.
     """
 
-    return await update_profile_picture(claims["sub"], profile_picture, db, supabase, openai)
+    return await update_profile_picture(claims["sub"], profile_type, profile_picture, db, supabase, openai)
 
-@router.patch("/me/username", response_model = Me)
-@limiter.limit(STRICT_ACCOUNT_CHANGE)
-async def updateUsername(
+@router.patch("/me/default-profile", response_model = Me)
+@limiter.limit(MODERATE)
+async def updateDefaultProfile(
     request: Request,
     response: Response,
-    body: UsernameUpdate,
+    body: DefaultProfileUpdate,
     db: AsyncSession = Depends(get_db),
-    openai: AsyncOpenAI = Depends(get_openai),
     claims: dict = Depends(verify_supabase_jwt)
 ):
     """
-    Changes the signed in user's username, using the same rules as sign up.
+    Sets which of the signed in user's profiles is their default.
     """
 
-    return await change_username(claims["sub"], body.username, db, openai)
+    return await set_default_profile(claims["sub"], body.type, db)
+
+@router.delete("/me/profiles/{profile_type}", response_model = Me)
+@limiter.limit(MODERATE)
+async def deleteProfile(
+    request: Request,
+    response: Response,
+    profile_type: ProfileType,
+    db: AsyncSession = Depends(get_db),
+    supabase: AsyncClient = Depends(get_supabase),
+    claims: dict = Depends(verify_supabase_jwt)
+):
+    """
+    Deletes one of the signed in user's profiles and returns the updated /me. 404 if they don't
+    have that type, 409 if it's their only profile. Deleting the default promotes the oldest remaining profile.
+    """
+
+    return await delete_profile(claims["sub"], profile_type, db, supabase)
 
 @router.delete("/me", status_code = 204)
 @limiter.limit(STRICT_ACCOUNT_DELETE)
