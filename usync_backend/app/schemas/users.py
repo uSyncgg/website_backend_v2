@@ -3,7 +3,7 @@ import re
 from datetime import date
 from pydantic import BaseModel, model_validator, ConfigDict, StringConstraints, Field, BeforeValidator, AfterValidator, PlainSerializer
 from typing import Any, Literal, ClassVar, Annotated
-from app.schemas.links import LinkPlatform, normalize_links
+from app.schemas.links import LinkPlatform, check_link_types, normalize_links
 
 NONEMPTYSTR = Annotated[str, StringConstraints(min_length=1)]
 
@@ -138,6 +138,11 @@ class ProfileBase(StrictIn):
     other_role_detail: str | None = None
     links: Links | None = None
 
+    @model_validator(mode = "after")
+    def check_links(self):
+        check_link_types(self.type, self.links)
+        return self
+
 class PlayerProfileIn(ProfileBase):
     type: Literal["player"]
     details: PlayerDetails
@@ -220,6 +225,11 @@ class VenueOut(BaseModel):
 
 class PlayerPublic(BaseModel):
     games: list[str] = []
+    # Game account IDs are shown on the profile so people can add the player in game.
+    battlenet: str | None = None
+    activision: str | None = None
+    steam: str | None = None
+    riot: str | None = None
 
 class HostPublic(BaseModel):
     organization: str

@@ -10,6 +10,25 @@ LinkPlatform = Literal[
     "website", "tiktok", "linkedin", "facebook", "linktree",
 ]
 
+_SOCIALS = {"twitch", "twitter", "youtube", "kick", "discord", "instagram"}
+
+# Which platforms each profile type can link: players add competitive sites, hosts and venues
+# (organisations) add their own website and brand pages. Matches the frontend's platformsFor.
+ALLOWED_LINKS = {
+    "player": _SOCIALS | {"cmg", "gankster", "faceit", "battlefy"},
+    "host": _SOCIALS | {"website", "tiktok", "linkedin", "facebook", "linktree"},
+    "venue": _SOCIALS | {"website", "tiktok", "linkedin", "facebook", "linktree"},
+}
+
+def check_link_types(profile_type: str, links: dict[str, str] | None) -> None:
+    """
+    Raises ValueError if `links` has a platform this profile type can't link.
+    """
+
+    not_allowed = sorted(set(links or {}) - ALLOWED_LINKS[profile_type])
+    if not_allowed:
+        raise ValueError(f"A {profile_type} profile can't link {', '.join(not_allowed)}.")
+
 # Only a handle is ever stored; the frontend builds the link from its own base URL for the
 # platform (https://x.com/<handle>, ...). So whatever was typed or pasted - "@name", "x.com/name",
 # "https://x.com/name?s=21", even "https://othersite.com/name" - is reduced to "name", and a link

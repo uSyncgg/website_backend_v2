@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.exc import IntegrityError
+from app.schemas.links import check_link_types
 from app.schemas.users import (
     RegistrationIn,
     RegistrationOut,
@@ -633,7 +634,13 @@ async def get_profile(public_id: str, db: AsyncSession) -> Profile:
 
     if profile.type == "player":
         player = (await db.execute(select(Players).where(Players.profile_id == profile.id))).scalars().first()
-        details = PlayerPublic(games = _without_other(player.games if player else None))
+        details = PlayerPublic(
+            games = _without_other(player.games if player else None),
+            battlenet = player.battlenet if player else None,
+            activision = player.activision if player else None,
+            steam = player.steam if player else None,
+            riot = player.riot if player else None
+        )
     elif profile.type == "host":
         host = (await db.execute(select(Hosts).where(Hosts.profile_id == profile.id))).scalars().one()
         details = HostPublic(
@@ -846,6 +853,11 @@ async def update_profile(user_id: str, profile_type: ProfileType, changes: Profi
     links = payload.pop("links", None)
     details = payload.pop("details", None)
     details_values = None
+
+    try:
+        check_link_types(profile_type, links)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
     if details is not None:
         try:
