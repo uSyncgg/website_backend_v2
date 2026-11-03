@@ -11,8 +11,8 @@ from app.services import GAMES
 BRACKET_GAMES = tuple(GAMES)
 PLAYER_FIELD_OPTIONS = ("Activision ID", "Riot ID", "Epic ID", "Steam", "Battle.net", "Xbox Gamertag", "PSN", "Discord", "Twitter / X")
 
-# Same as the site's sections (and ProfileEvent.kind for listed events).
-BracketEventType = Literal["league", "lan", "wager", "h2h"]
+# Like the site's sections. Wagers and head-to-head aren't offered to hosts for now.
+BracketEventType = Literal["league", "lan", "tournament"]
 BracketFormat = Literal["single_elim", "double_elim", "round_robin"]
 BracketLocation = Literal["online", "in_person"]
 BracketStage = Literal["registration", "closed", "seeding", "live", "complete"]

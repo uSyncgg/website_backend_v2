@@ -18,7 +18,7 @@ down_revision: Union[str, Sequence[str], None] = 'a7c3e1b9d2f4'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
-BRACKET_EVENT_TYPE = postgresql.ENUM("league", "lan", "wager", "h2h", name = "bracket_event_type", create_type = False)
+BRACKET_EVENT_TYPE = postgresql.ENUM("league", "lan", "tournament", name = "bracket_event_type", create_type = False)
 BRACKET_FORMAT = postgresql.ENUM("single_elim", "double_elim", "round_robin", name = "bracket_format", create_type = False)
 BRACKET_LOCATION = postgresql.ENUM("online", "in_person", name = "bracket_location", create_type = False)
 BRACKET_DECISION = postgresql.ENUM("host", "players", "forfeit", "cleared", name = "bracket_decision", create_type = False)

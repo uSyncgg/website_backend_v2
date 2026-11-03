@@ -7,7 +7,7 @@ from sqlalchemy import ForeignKey, ForeignKeyConstraint, String, DateTime, Index
 from sqlalchemy.dialects.postgresql import ARRAY, ENUM, JSONB
 
 # The enum types are created by the migration, so the models never try to create them.
-BRACKET_EVENT_TYPE = ENUM("league", "lan", "wager", "h2h", name = "bracket_event_type", create_type = False)
+BRACKET_EVENT_TYPE = ENUM("league", "lan", "tournament", name = "bracket_event_type", create_type = False)
 BRACKET_FORMAT = ENUM("single_elim", "double_elim", "round_robin", name = "bracket_format", create_type = False)
 BRACKET_LOCATION = ENUM("online", "in_person", name = "bracket_location", create_type = False)
 BRACKET_DECISION = ENUM("host", "players", "forfeit", "cleared", name = "bracket_decision", create_type = False)
@@ -30,8 +30,8 @@ class BracketEvents(Base):
     account_id: Mapped[uuid.UUID] = mapped_column(index = True)
     host_profile_id: Mapped[uuid.UUID] = mapped_column(index = True)
     name: Mapped[str] = mapped_column(String(80))
-    # Which section of the site it belongs to, like the listings: league, LAN, wager or
-    # head-to-head. LANs are always in person.
+    # Which kind of event it is, like the site's sections: league, LAN or tournament (wagers and
+    # head-to-head aren't offered to hosts for now). LANs are always in person.
     event_type: Mapped[str] = mapped_column(BRACKET_EVENT_TYPE)
     game: Mapped[str] = mapped_column()
     format: Mapped[str] = mapped_column(BRACKET_FORMAT)
