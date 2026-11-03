@@ -253,7 +253,7 @@ async def get_bracket_event(event_id: uuid.UUID, viewer_id: str | None, db: Asyn
         payments = PaymentsOut(
             enabled = event.payments_enabled,
             tiers = [PassTierOut(id = t.id, name = t.tier_name, price_cents = t.price_cents, capacity = t.capacity, sold_count = t.sold_count) for t in tiers],
-            payout_email = event.payout_email if host_view else None,
+            notify_email = event.notify_email if host_view else None,
         ),
         delays = [DelayOut(from_starts_at = d.from_starts_at, to_starts_at = d.to_starts_at, reason = d.reason, at = d.created_at) for d in delays],
         entrant_count = sum(_holds_spot(e, s) for e, s in entrants),
@@ -338,7 +338,7 @@ async def create_bracket_event(payload: BracketEventIn, account_id: str, db: Asy
         signup_player_fields = payload.signup_form.player_fields,
         signup_questions = [q.model_dump() for q in payload.signup_form.questions],
         payments_enabled = pay.enabled,
-        payout_email = pay.payout_email if pay.enabled else None,
+        notify_email = pay.notify_email if pay.enabled else None,
     ))
 
     if pay.enabled:
@@ -346,7 +346,7 @@ async def create_bracket_event(payload: BracketEventIn, account_id: str, db: Asy
             db.add(EventPassTiers(
                 event_id = parent.id,
                 user_id = profile.account_id,
-                host_email = pay.payout_email,
+                host_email = pay.notify_email,
                 tier_name = tier.name,
                 price_cents = tier.price_cents,
                 capacity = tier.capacity,

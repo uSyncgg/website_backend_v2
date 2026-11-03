@@ -53,7 +53,7 @@ def upgrade() -> None:
         sa.Column("signup_player_fields", postgresql.ARRAY(sa.String()), server_default = sa.text("'{}'"), nullable = False),
         sa.Column("signup_questions", postgresql.JSONB(), server_default = sa.text("'[]'::jsonb"), nullable = False),
         sa.Column("payments_enabled", sa.Boolean(), server_default = sa.text("false"), nullable = False),
-        sa.Column("payout_email", sa.String(), nullable = True),
+        sa.Column("notify_email", sa.String(), nullable = True),
         sa.Column("created_at", sa.DateTime(timezone = True), server_default = _now(), nullable = False),
         sa.Column("updated_at", sa.DateTime(timezone = True), server_default = _now(), nullable = False),
         sa.ForeignKeyConstraint(
@@ -65,7 +65,7 @@ def upgrade() -> None:
         sa.CheckConstraint("max_entrants IS NULL OR max_entrants >= 2", name = "ck_bracket_events_max_entrants"),
         sa.CheckConstraint("no_show_minutes IS NULL OR no_show_minutes >= 0", name = "ck_bracket_events_no_show_minutes"),
         sa.CheckConstraint("location_type = 'online' OR venue IS NOT NULL", name = "ck_bracket_events_venue"),
-        sa.CheckConstraint("NOT payments_enabled OR payout_email IS NOT NULL", name = "ck_bracket_events_payout_email"),
+        sa.CheckConstraint("NOT payments_enabled OR notify_email IS NOT NULL", name = "ck_bracket_events_notify_email"),
     )
     op.create_index("ix_bracket_events_host_profile_id", "bracket_events", ["host_profile_id"])
     op.create_index("ix_bracket_events_account_id", "bracket_events", ["account_id"])

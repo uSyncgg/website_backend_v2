@@ -51,9 +51,11 @@ class BracketEvents(Base):
     signup_player_fields: Mapped[list[str]] = mapped_column(ARRAY(String), server_default = text("'{}'"))
     signup_questions: Mapped[list[dict]] = mapped_column(JSONB, server_default = text("'[]'::jsonb"))
     # Paid events: the pass tiers live in event_pass_tiers (event_id = this event), each carrying
-    # payout_email as its host_email, like the existing pass portal.
+    # notify_email as its host_email, like the existing pass portal: the host is emailed there
+    # for every paid sign-up. It isn't where money goes - uSync collects entry fees and pays
+    # hosts out separately.
     payments_enabled: Mapped[bool] = mapped_column(server_default = text("false"))
-    payout_email: Mapped[str | None] = mapped_column(nullable = True)
+    notify_email: Mapped[str | None] = mapped_column(nullable = True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = func.now(), onupdate = func.now())
 
@@ -69,7 +71,7 @@ class BracketEvents(Base):
         CheckConstraint("max_entrants IS NULL OR max_entrants >= 2", name = "ck_bracket_events_max_entrants"),
         CheckConstraint("no_show_minutes IS NULL OR no_show_minutes >= 0", name = "ck_bracket_events_no_show_minutes"),
         CheckConstraint("location_type = 'online' OR venue IS NOT NULL", name = "ck_bracket_events_venue"),
-        CheckConstraint("NOT payments_enabled OR payout_email IS NOT NULL", name = "ck_bracket_events_payout_email"),
+        CheckConstraint("NOT payments_enabled OR notify_email IS NOT NULL", name = "ck_bracket_events_notify_email"),
     )
 
 class BracketEventDelays(Base):

@@ -79,15 +79,15 @@ class PassTierIn(StrictIn):
 
 class PaymentsIn(StrictIn):
     enabled: bool = False
-    payout_email: str | None = None
+    notify_email: str | None = None
     tiers: list[PassTierIn] = []
 
     @model_validator(mode = "after")
     def paid_needs_details(self):
         if not self.enabled:
             return self
-        if not self.payout_email or not _EMAIL.match(self.payout_email):
-            raise ValueError("Add the email we send payouts to.")
+        if not self.notify_email or not _EMAIL.match(self.notify_email):
+            raise ValueError("Add the email we should notify about new sign-ups.")
         if not self.tiers:
             raise ValueError("A paid event needs at least one pass.")
         if len({t.name.lower() for t in self.tiers}) != len(self.tiers):
@@ -259,7 +259,7 @@ class PaymentsOut(BaseModel):
     enabled: bool
     tiers: list[PassTierOut] = []
     # Only on the host's view.
-    payout_email: str | None = None
+    notify_email: str | None = None
 
 class DelayOut(BaseModel):
     from_starts_at: datetime
@@ -337,7 +337,7 @@ class BracketOut(BaseModel):
 class BracketEventOut(BaseModel):
     """
     An event as players see it (GET /brackets/{id}); the host's view (GET /brackets/{id}/manage)
-    fills in the entrant details, payout email, the unpublished bracket and the decision log.
+    fills in the entrant details, the sign-up notification email, the unpublished bracket and the decision log.
     """
 
     id: uuid.UUID
