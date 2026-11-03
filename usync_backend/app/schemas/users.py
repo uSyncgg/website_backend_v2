@@ -3,12 +3,11 @@ import re
 from datetime import date
 from pydantic import BaseModel, model_validator, ConfigDict, StringConstraints, Field, BeforeValidator, AfterValidator, PlainSerializer
 from typing import Any, Literal, ClassVar, Annotated
+from app.schemas.links import LinkPlatform, normalize_links
 
 NONEMPTYSTR = Annotated[str, StringConstraints(min_length=1)]
 
 ProfileType = Literal["player", "host", "venue"]
-# Socials plus competitive site accounts (CMG, Gankster, FACEIT, Battlefy).
-LinkPlatform = Literal["twitch", "twitter", "youtube", "kick", "discord", "instagram", "cmg", "gankster", "faceit", "battlefy"]
 PictureSource = Literal["upload", "copy_default"]
 
 # other_roles is a set (no duplicates) that leaves as a sorted list, so the
@@ -65,6 +64,9 @@ def _clean_handle(value: Any) -> Any:
 
 # A linked account handle, stored without a leading @ (so "@SamTV" and "SamTV" are the same).
 LinkHandle = Annotated[str, BeforeValidator(_clean_handle), StringConstraints(min_length=1)]
+
+# A profile's linked accounts, each reduced to just the handle (see app/schemas/links.py).
+Links = Annotated[dict[LinkPlatform, LinkHandle], AfterValidator(normalize_links)]
 
 # Game account IDs are unique across players, so a blank one is stored as NULL (Postgres
 # allows any number of NULLs in a unique column, but only one "").
@@ -134,7 +136,7 @@ class ProfileBase(StrictIn):
     bracket_hosting: bool = True
     other_roles: OtherRolesIn | None = None
     other_role_detail: str | None = None
-    links: dict[LinkPlatform, LinkHandle] | None = None
+    links: Links | None = None
 
 class PlayerProfileIn(ProfileBase):
     type: Literal["player"]
@@ -379,7 +381,7 @@ class ProfileUpdate(Updater):
     bracket_hosting: bool | None = None
     other_roles: OtherRolesIn | None = None
     other_role_detail: str | None = None
-    links: dict[LinkPlatform, LinkHandle] | None = None
+    links: Links | None = None
     details: dict[str, Any] | None = None
 
 class UsernameUpdate(StrictIn):

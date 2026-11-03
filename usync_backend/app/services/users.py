@@ -61,7 +61,8 @@ DETAIL_UPDATES = {"player": PlayerUpdate, "host": HostUpdate, "venue": VenueUpda
 GAME_ACCOUNT_LABELS = {"battlenet": "Battle.net", "activision": "Activision", "steam": "Steam", "riot": "Riot"}
 LINK_LABELS = {
     "twitch": "Twitch", "twitter": "Twitter", "youtube": "YouTube", "kick": "Kick", "discord": "Discord",
-    "instagram": "Instagram", "cmg": "CMG", "gankster": "Gankster", "faceit": "FACEIT", "battlefy": "Battlefy"
+    "instagram": "Instagram", "cmg": "CMG", "gankster": "Gankster", "faceit": "FACEIT", "battlefy": "Battlefy",
+    "website": "Website", "tiktok": "TikTok", "linkedin": "LinkedIn", "facebook": "Facebook", "linktree": "Linktree"
 }
 _USERNAME_CONFLICT_RE = re.compile(r"\(type, canonical_username\)=\((\w+),")
 _LINK_CONFLICT_RE = re.compile(r"\(platform, canonical_handle, account_id\)=\((\w+),")
