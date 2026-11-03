@@ -13,6 +13,8 @@ PLAYER_FIELD_OPTIONS = ("Activision ID", "Riot ID", "Epic ID", "Steam", "Battle.
 
 # Like the site's sections. Wagers and head-to-head aren't offered to hosts for now.
 BracketEventType = Literal["league", "lan", "tournament"]
+# Tournaments can only be posted for this game for now.
+TOURNAMENT_GAME = "Call of Duty"
 BracketFormat = Literal["single_elim", "double_elim", "round_robin"]
 BracketLocation = Literal["online", "in_person"]
 BracketStage = Literal["registration", "closed", "seeding", "live", "complete"]
@@ -145,6 +147,8 @@ class BracketEventIn(BracketEventFields):
 
     @model_validator(mode = "after")
     def venue_for_lans(self):
+        if self.event_type == "tournament" and self.game != TOURNAMENT_GAME:
+            raise ValueError(f"Only {TOURNAMENT_GAME} tournaments can be posted for now.")
         if self.event_type == "lan" and self.location_type != "in_person":
             raise ValueError("LANs are held in person.")
         if self.location_type == "in_person" and not self.venue:

@@ -45,6 +45,7 @@ from app.schemas.brackets import (
     ScoreIn,
     SeedsIn,
     SignupForm,
+    TOURNAMENT_GAME,
     check_match_id
 )
 from app.services import PLATFORM_FEE_PERCENT
@@ -378,6 +379,8 @@ async def update_bracket_event(event_id: uuid.UUID, payload: BracketEventUpdate,
             raise HTTPException(status_code = 409, detail = f"{held} have already signed up, so the cap can't go below that.")
 
     event_type = changes.get("event_type") or event.event_type
+    if event_type == "tournament" and (changes.get("game") or event.game) != TOURNAMENT_GAME:
+        raise HTTPException(status_code = 422, detail = f"Only {TOURNAMENT_GAME} tournaments can be posted for now.")
     location = changes.get("location_type") or event.location_type
     venue = changes.get("venue", event.venue)
     if event_type == "lan" and location != "in_person":
