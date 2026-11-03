@@ -2,8 +2,8 @@ from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.dependencies import get_readonly_db, require_admin
 from app.core.limiter import limiter, MODERATE
-from app.schemas.admin import AdminAnalyticsOut, AdminEventsOut
-from app.services.admin import get_admin_analytics, get_admin_events
+from app.schemas.admin import AdminAccountsOut, AdminAnalyticsOut, AdminEventsOut
+from app.services.admin import get_admin_accounts, get_admin_analytics, get_admin_events
 
 # Admin dashboard reads. GET only, admins only (ADMIN_EMAILS), and the session is READ ONLY.
 router = APIRouter(prefix="/admin", tags=["Admin"])
@@ -25,3 +25,12 @@ async def adminEvents(request: Request, response: Response, claims: dict = Depen
     """
 
     return await get_admin_events(db)
+
+@router.get("/accounts", response_model=AdminAccountsOut)
+@limiter.limit(MODERATE)
+async def adminAccounts(request: Request, response: Response, claims: dict = Depends(require_admin), db: AsyncSession = Depends(get_readonly_db)):
+    """
+    Every account, including unfinished sign-ups, with roles, games and linked platforms.
+    """
+
+    return await get_admin_accounts(db)

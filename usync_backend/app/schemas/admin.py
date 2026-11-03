@@ -37,3 +37,21 @@ class AdminEvent(BaseModel):
 class AdminEventsOut(BaseModel):
     generated_at: datetime
     events: list[AdminEvent]
+
+class AdminAccount(BaseModel):
+    id: UUID
+    # None until the account finishes sign-up and gets a users row.
+    username: str | None
+    email: str | None
+    created_at: datetime
+    is_player: bool
+    is_host: bool
+    is_venue: bool
+    profile_complete: bool
+    games: list[str]
+    # Platform key -> handle, only for platforms the account has linked.
+    linked: dict[str, str]
+
+class AdminAccountsOut(BaseModel):
+    generated_at: datetime
+    accounts: list[AdminAccount]
