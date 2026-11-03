@@ -3,12 +3,11 @@ import re
 from datetime import date
 from pydantic import BaseModel, model_validator, ConfigDict, StringConstraints, Field, BeforeValidator, AfterValidator, PlainSerializer
 from typing import Any, Literal, ClassVar, Annotated
+from app.schemas.links import LinkPlatform, check_link_types, normalize_links
 
 NONEMPTYSTR = Annotated[str, StringConstraints(min_length=1)]
 
 ProfileType = Literal["player", "host", "venue"]
-# Socials plus competitive site accounts (CMG, Gankster, FACEIT, Battlefy).
-LinkPlatform = Literal["twitch", "twitter", "youtube", "kick", "discord", "instagram", "cmg", "gankster", "faceit", "battlefy"]
 PictureSource = Literal["upload", "copy_default"]
 
 # other_roles is a set (no duplicates) that leaves as a sorted list, so the
@@ -65,6 +64,9 @@ def _clean_handle(value: Any) -> Any:
 
 # A linked account handle, stored without a leading @ (so "@SamTV" and "SamTV" are the same).
 LinkHandle = Annotated[str, BeforeValidator(_clean_handle), StringConstraints(min_length=1)]
+
+# A profile's linked accounts, each reduced to just the handle (see app/schemas/links.py).
+Links = Annotated[dict[LinkPlatform, LinkHandle], AfterValidator(normalize_links)]
 
 # Game account IDs are unique across players, so a blank one is stored as NULL (Postgres
 # allows any number of NULLs in a unique column, but only one "").
@@ -134,7 +136,12 @@ class ProfileBase(StrictIn):
     bracket_hosting: bool = True
     other_roles: OtherRolesIn | None = None
     other_role_detail: str | None = None
-    links: dict[LinkPlatform, LinkHandle] | None = None
+    links: Links | None = None
+
+    @model_validator(mode = "after")
+    def check_links(self):
+        check_link_types(self.type, self.links)
+        return self
 
 class PlayerProfileIn(ProfileBase):
     type: Literal["player"]
@@ -201,6 +208,8 @@ class ProfileSummary(BaseModel):
     username: str
     public_id: str
     profile_picture: str | None = None
+    # Whether this profile hosts brackets on uSync (host and venue profiles post bracket events).
+    bracket_hosting: bool = True
 
 class Me(BaseModel):
     """
@@ -216,8 +225,31 @@ class VenueOut(BaseModel):
     name: str
     location: str
 
+class ProfileEvent(BaseModel):
+    """
+    An event on the site owned by the profile's account. `kind` says which section of the site
+    it lives in (lans, leagues, wagers or head-to-head), which with `game` and `path` gives the
+    frontend its page. Bracket events are the ones the profile posted itself; their `path` is
+    already the public bracket page (/brackets/<id>).
+    """
+
+    kind: Literal["lan", "league", "wager", "h2h", "bracket"]
+    # For bracket events: which kind of event the host posted it as (league, lan, tournament).
+    event_type: Literal["league", "lan", "tournament"] | None = None
+    name: str
+    game: str
+    path: str
+    date: str | None = None
+    location: str | None = None
+    verified: bool = False
+
 class PlayerPublic(BaseModel):
     games: list[str] = []
+    # Game account IDs are shown on the profile so people can add the player in game.
+    battlenet: str | None = None
+    activision: str | None = None
+    steam: str | None = None
+    riot: str | None = None
 
 class HostPublic(BaseModel):
     organization: str
@@ -379,7 +411,7 @@ class ProfileUpdate(Updater):
     bracket_hosting: bool | None = None
     other_roles: OtherRolesIn | None = None
     other_role_detail: str | None = None
-    links: dict[LinkPlatform, LinkHandle] | None = None
+    links: Links | None = None
     details: dict[str, Any] | None = None
 
 class UsernameUpdate(StrictIn):

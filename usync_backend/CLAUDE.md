@@ -80,7 +80,8 @@ Request flow is layered: **router → service → model**, with **schema** (Pyda
 
 ## Current state / gotchas
 
-- Registered routers: `tournaments`, `healthcheck`, `events`, `sitemap`, `event_registration`, `webhooks`, `users`. The `payment`, `host_forms`, and `verification` routers exist but are **not yet registered**; stubs are marked `# Need return function` (also `/users/profile/update`). Wire the router into `main.py` and implement the service when building these out.
+- Registered routers: `tournaments`, `healthcheck`, `events`, `sitemap`, `event_registration`, `webhooks`, `users`, `brackets`.
+- Bracket hosting (`app/routers/brackets.py`): brackets are never stored as matches, only seeds + results; `app/services/bracket_engine.py` rebuilds them and must stay in step with the frontend's `src/utils/bracket.js` (same match ids, same placement rules). Paid bracket sign-ups reuse `event_pass_tiers` / `event_registrations` and the `/event-registration/{id}/payment-intent` checkout. The `payment`, `host_forms`, and `verification` routers exist but are **not yet registered**; stubs are marked `# Need return function` (also `/users/profile/update`). Wire the router into `main.py` and implement the service when building these out.
 - Import paths should be absolute from the package root (`from app.services...`).
 - Stripe mode is controlled by `STRIPE_LIVE_MODE` (default `false`): when false, the test key/webhook secret are used; when `true`, the live ones (`app/services/__init__.py`).
 - Transactional email is sent through **Resend** (`app/services/email.py`).

@@ -11,6 +11,7 @@ PROFILE_TYPE = ENUM("player", "host", "venue", name = "profile_type", create_typ
 LINK_PLATFORM = ENUM(
     "twitch", "twitter", "youtube", "kick", "discord", "instagram",
     "cmg", "gankster", "faceit", "battlefy",
+    "website", "tiktok", "linkedin", "facebook", "linktree",
     name = "link_platform", create_type = False
 )
 
