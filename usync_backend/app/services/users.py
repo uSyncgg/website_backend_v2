@@ -16,6 +16,7 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.exc import IntegrityError
 from app.schemas.links import check_link_types
 from app.schemas.users import (
+    ProfileEvent,
     RegistrationIn,
     RegistrationOut,
     ProfileIn,
@@ -37,6 +38,7 @@ from app.schemas.users import (
     VenueUpdate
 )
 from app.models.users import UsersParent, Profiles, ProfileLinks, Players, Hosts, Venues
+from app.models.host_data import EventFormParent, LanEvents, LeagueParentEvents, LeagueEvents, WagerEvents, XpEvents
 from PIL import Image, ImageOps, UnidentifiedImageError
 from supabase import AsyncClient
 from storage3.utils import StorageException
@@ -613,6 +615,52 @@ async def get_me(user_id: str, db: AsyncSession) -> Me:
     default = next((_summary(p) for p in profiles if p.id == user.default_profile_id), None)
 
     return Me(verified = user.verified, default_profile = default, profiles = [_summary(p) for p in profiles])
+
+# Event tables a host or venue's events can be in, and the site section each one lives under.
+_EVENT_TABLES = (
+    ("lan", LanEvents, LanEvents.event_id),
+    ("league", LeagueParentEvents, LeagueParentEvents.id),
+    ("league", LeagueEvents, LeagueEvents.event_id),
+    ("wager", WagerEvents, WagerEvents.event_id),
+    ("h2h", XpEvents, XpEvents.event_id),
+)
+
+async def get_profile_events(public_id: str, db: AsyncSession) -> list[ProfileEvent]:
+    """
+    The public events owned by a host or venue profile's account (events.user_id), newest
+    listing first within each kind. Pending events and archived LANs aren't public, so they're
+    left out. Players don't own events, so theirs is always empty.
+    """
+
+    profile = (await db.execute(select(Profiles).where(Profiles.public_id == public_id))).scalars().first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="User does not exist.")
+    if profile.type == "player":
+        return []
+
+    events: list[ProfileEvent] = []
+    for kind, table, event_id in _EVENT_TABLES:
+        query = (
+            select(table)
+            .join(EventFormParent, EventFormParent.id == event_id)
+            .where(EventFormParent.user_id == profile.account_id, table.status != "pending")
+            .order_by(table.updated_at.desc())
+        )
+        if table is LanEvents:
+            query = query.where(LanEvents.archived.is_(False))
+
+        for row in (await db.execute(query)).scalars():
+            events.append(ProfileEvent(
+                kind = kind,
+                name = row.name,
+                game = row.game,
+                path = row.path,
+                date = getattr(row, "date", None),
+                location = getattr(row, "location", None),
+                verified = bool(row.verified)
+            ))
+
+    return events
 
 async def get_profile(public_id: str, db: AsyncSession) -> Profile:
     """

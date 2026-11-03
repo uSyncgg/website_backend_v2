@@ -223,6 +223,21 @@ class VenueOut(BaseModel):
     name: str
     location: str
 
+class ProfileEvent(BaseModel):
+    """
+    An event on the site owned by the profile's account. `kind` says which section of the site
+    it lives in (lans, leagues, wagers or head-to-head), which with `game` and `path` gives the
+    frontend its page.
+    """
+
+    kind: Literal["lan", "league", "wager", "h2h"]
+    name: str
+    game: str
+    path: str
+    date: str | None = None
+    location: str | None = None
+    verified: bool = False
+
 class PlayerPublic(BaseModel):
     games: list[str] = []
     # Game account IDs are shown on the profile so people can add the player in game.
