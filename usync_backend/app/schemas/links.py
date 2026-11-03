@@ -39,7 +39,6 @@ _SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 _BARE_DOMAIN_RE = re.compile(r"^(www\.)?[a-z0-9-]+\.[a-z]{2,}$", re.IGNORECASE)
 _WEBSITE_RE = re.compile(r"^[a-z0-9-]+(\.[a-z0-9-]+)+(/\S*)?$", re.IGNORECASE)
 _HANDLE_JUNK_RE = re.compile(r"[^\w.\-]")
-_DISCORD_INVITE_RE = re.compile(r"(discord\.gg|discord(app)?\.com/invite)/", re.IGNORECASE)
 
 # LinkedIn pages live under a section ("company/usync", "in/jake"), which is kept with the name.
 _LINKEDIN_SECTIONS = {"company", "in", "school", "showcase"}
@@ -78,12 +77,9 @@ def normalize_link(platform: str, value: str) -> str:
         return site.lower() if _WEBSITE_RE.match(site) else ""
 
     if platform == "discord":
-        # Hosts and venues link a server invite (discord.gg/code, discord.com/invite/code);
-        # players a username. Invite codes are case sensitive, so neither is lower cased.
-        if _DISCORD_INVITE_RE.search(raw):
-            segments = [s for s in _path_segments(raw) if s.lower() != "invite"]
-            return _clean(segments[0]) if segments else ""
-        return _clean(raw)
+        # Always a plain username, never a link: a pasted URL (an invite, a profile page) is
+        # rejected rather than turned into a handle.
+        return "" if re.search(r"[/:]", raw) else _clean(raw)
 
     segments = _path_segments(raw)
     if not segments:
