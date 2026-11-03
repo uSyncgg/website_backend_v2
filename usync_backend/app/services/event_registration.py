@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from stripe import StripeClient
 from app.models.event_registration import EventRegistrations, EventPassTiers
 from app.models.host_data import LanEvents
+from app.models.brackets import BracketEvents
 from app.schemas.event_registration import EventPassesOut, EventSubmissionIn, EventSubmissionOut, PaymentIntentOut, ReceiptOut
 from collections.abc import Sequence
 from collections import defaultdict
@@ -329,6 +330,11 @@ async def get_pass_event_helper(registration: EventRegistrations, db: AsyncSessi
     event_stmt = select(LanEvents.name).where(LanEvents.event_id == registration.event_id)
     result = await db.execute(event_stmt)
     event_name = result.scalars().first()
+
+    # Paid sign-ups for a host's bracket event use the same passes and checkout.
+    if event_name is None:
+        bracket_stmt = select(BracketEvents.name).where(BracketEvents.event_id == registration.event_id)
+        event_name = (await db.execute(bracket_stmt)).scalars().first()
 
     return event_pass, event_name
 

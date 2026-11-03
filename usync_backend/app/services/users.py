@@ -39,6 +39,7 @@ from app.schemas.users import (
 )
 from app.models.users import UsersParent, Profiles, ProfileLinks, Players, Hosts, Venues
 from app.models.host_data import EventFormParent, LanEvents, LeagueParentEvents, LeagueEvents, WagerEvents, XpEvents
+from app.models.brackets import BracketEvents
 from PIL import Image, ImageOps, UnidentifiedImageError
 from supabase import AsyncClient
 from storage3.utils import StorageException
@@ -576,7 +577,8 @@ def _summary(profile: Profiles) -> ProfileSummary:
         type = profile.type,
         username = profile.username,
         public_id = profile.public_id,
-        profile_picture = profile.profile_picture
+        profile_picture = profile.profile_picture,
+        bracket_hosting = profile.bracket_hosting
     )
 
 async def _account_profiles(account_id, db: AsyncSession) -> list[Profiles]:
@@ -628,8 +630,9 @@ _EVENT_TABLES = (
 async def get_profile_events(public_id: str, db: AsyncSession) -> list[ProfileEvent]:
     """
     The public events owned by a host or venue profile's account (events.user_id), newest
-    listing first within each kind. Pending events and archived LANs aren't public, so they're
-    left out. Players don't own events, so theirs is always empty.
+    listing first within each kind, after the bracket events this profile posted. Pending events
+    and archived LANs aren't public, so they're left out. Players don't own events, so theirs is
+    always empty.
     """
 
     profile = (await db.execute(select(Profiles).where(Profiles.public_id == public_id))).scalars().first()
@@ -638,7 +641,23 @@ async def get_profile_events(public_id: str, db: AsyncSession) -> list[ProfileEv
     if profile.type == "player":
         return []
 
-    events: list[ProfileEvent] = []
+    # Bracket events this profile posted, latest start first. date is ISO for the frontend to format.
+    brackets = await db.execute(
+        select(BracketEvents)
+        .where(BracketEvents.host_profile_id == profile.id)
+        .order_by(BracketEvents.starts_at.desc())
+    )
+    events: list[ProfileEvent] = [
+        ProfileEvent(
+            kind = "bracket",
+            name = row.name,
+            game = row.game,
+            path = f"/brackets/{row.event_id}",
+            date = row.starts_at.isoformat(),
+            location = "Online" if row.location_type == "online" else row.venue
+        )
+        for row in brackets.scalars()
+    ]
     for kind, table, event_id in _EVENT_TABLES:
         query = (
             select(table)

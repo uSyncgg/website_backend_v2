@@ -1,3 +1,4 @@
+import html
 import os
 import resend
 import uuid
@@ -101,6 +102,45 @@ async def send_host_confirmation(to: str, event_name: str, player_info: list[dic
         "to": [to],
         "subject": f"New sign-up for {event_name}",
         "html": html,
+    })
+
+    return None
+
+async def send_bracket_delay_email(to: list[str], event_name: str, starts_at: str, reason: str, event_url: str) -> None:
+    """
+    Asynchronous function to tell everyone signed up for a bracket event that its start moved.
+    Recipients are sent as bcc so entrants don't see each other's emails.
+
+    ::param to the list of entrant emails
+    ::param event_name the string containing the event's name
+    ::param starts_at the new start, already formatted for people to read
+    ::param reason the host's reason (may be empty)
+    ::param event_url the public event page
+    """
+
+    if not to:
+        return None
+
+    name = html.escape(event_name)
+    reason_line = f"<p>From the host: {html.escape(reason)}</p>" if reason else ""
+
+    body = f"""
+    <html>
+    <body style="font-family: sans-serif; color: #111111;">
+        <h2>{name} has a new start time</h2>
+        <p>The host moved the start to <strong>{html.escape(starts_at)}</strong>.</p>
+        {reason_line}
+        <p><a href="{html.escape(event_url)}">View the event</a></p>
+    </body>
+    </html>
+    """
+
+    await resend.Emails.send_async({
+        "from": FROM_EMAIL,
+        "to": [FROM_EMAIL],
+        "bcc": to,
+        "subject": f"Start time changed: {event_name}",
+        "html": body,
     })
 
     return None

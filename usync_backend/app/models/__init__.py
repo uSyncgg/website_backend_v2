@@ -18,3 +18,13 @@ from app.models.users import (
 )
 from app.models.host_data import EventFormParent, LanEvents, LeagueEvents, XpEvents, WagerEvents
 from app.models.event_registration import EventPassTiers, EventRegistrations
+from app.models.brackets import (
+    BracketEvents,
+    BracketEventDelays,
+    BracketEntrants,
+    Brackets,
+    BracketMatchResults,
+    BracketMatchReports,
+    BracketNoShows,
+    BracketDecisionLog
+)

@@ -208,6 +208,8 @@ class ProfileSummary(BaseModel):
     username: str
     public_id: str
     profile_picture: str | None = None
+    # Whether this profile hosts brackets on uSync (host and venue profiles post bracket events).
+    bracket_hosting: bool = True
 
 class Me(BaseModel):
     """
@@ -227,10 +229,11 @@ class ProfileEvent(BaseModel):
     """
     An event on the site owned by the profile's account. `kind` says which section of the site
     it lives in (lans, leagues, wagers or head-to-head), which with `game` and `path` gives the
-    frontend its page.
+    frontend its page. Bracket events are the ones the profile posted itself; their `path` is
+    already the public bracket page (/brackets/<id>).
     """
 
-    kind: Literal["lan", "league", "wager", "h2h"]
+    kind: Literal["lan", "league", "wager", "h2h", "bracket"]
     name: str
     game: str
     path: str
