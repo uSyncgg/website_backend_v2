@@ -10,6 +10,7 @@ from app.models.host_data import LanEvents
 from app.models.event_registration import EventRegistrations, EventPassTiers
 from app.services.event_registration import check_and_send, host_confirmation, get_pass_event_helper
 from app.services import STRIPE_WEBHOOK_SECRET
+from app.services.registration_holds import release_registration
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,9 @@ async def handle_stripe_webhook(payload: bytes, signature: str, db: AsyncSession
     event_pass, event_name = await get_pass_event_helper(registration, db)
 
     if event["type"] == "payment_intent.succeeded":
+        if registration.payment_status in ("expired", "canceled"):
+            # Shouldn't happen: slots are only released after Stripe confirms the cancel.
+            logger.error("Registration %s paid after its slot was released; check pass counts", registration.id)
         registration.payment_status = "paid"
         registration.paid_at = datetime.now(timezone.utc)
         await db.commit()
@@ -62,7 +66,7 @@ async def handle_stripe_webhook(payload: bytes, signature: str, db: AsyncSession
         registration.payment_status = "payment_failed"
         await db.commit()
     elif event["type"] == "payment_intent.canceled":
-        registration.payment_status = "canceled"
-        await db.commit()
+        # Final: give the slot back. No-op if the sweeper already released it as "expired".
+        await release_registration(registration.id, "canceled", db)
 
     return {"status": "ok"}
