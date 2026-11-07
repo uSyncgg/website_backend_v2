@@ -97,10 +97,10 @@ class EventRegistrations(Base):
     __table_args__ = (
         Index(
             "uq_registrations_event_team_name", "event_id", "team_name_normalized",
-            unique=True, postgresql_where=text("team_name_normalized IS NOT NULL AND payment_status NOT IN ('expired', 'canceled')"),
+            unique=True, postgresql_where=text("team_name_normalized IS NOT NULL AND payment_status NOT IN ('expired', 'canceled', 'refunded')"),
         ),
         Index(
             "uq_registrations_individual_contact", "event_id", "pass_tier_id", "contact_email",
-            unique=True, postgresql_where=text("team_name_normalized IS NULL AND payment_status NOT IN ('expired', 'canceled')"),
+            unique=True, postgresql_where=text("team_name_normalized IS NULL AND payment_status NOT IN ('expired', 'canceled', 'refunded')"),
         ),
     )

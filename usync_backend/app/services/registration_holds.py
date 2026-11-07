@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 # Statuses that still hold a slot but have not paid. "payment_failed" is included because Stripe
 # lets the buyer retry on the same PaymentIntent, so a failed attempt is not final on its own.
 UNPAID_HOLD_STATUSES = ("pending", "payment_failed")
+# Statuses whose slot has been given back. Must match the unique indexes on event_registrations.
+RELEASED_STATUSES = ("expired", "canceled", "refunded")
 SWEEP_BATCH_SIZE = 50
 
 def hold_expired(registration: EventRegistrations) -> bool:
@@ -27,7 +29,7 @@ def hold_expired(registration: EventRegistrations) -> bool:
     ::return True if the registration is no longer allowed to pay
     """
 
-    if registration.payment_status in ("expired", "canceled"):
+    if registration.payment_status in RELEASED_STATUSES:
         return True
 
     # created_at is a naive UTC timestamp (server default now() on a UTC database).
@@ -40,26 +42,28 @@ async def release_registration(
     db: AsyncSession,
     expected_payment_intent_id: str | None = None,
     check_payment_intent: bool = False,
+    from_statuses: tuple[str, ...] = UNPAID_HOLD_STATUSES,
 ) -> bool:
     """
-    Asynchronous function to give an unpaid registration's slot back to its tier and pool.
+    Asynchronous function to give a registration's slot back to its tier and pool.
 
-    Safe to call more than once: the status change only matches a registration that is still
-    unpaid, so a second call (or a duplicate webhook) matches nothing and decrements nothing.
+    Safe to call more than once: the status change only matches a registration still in one of
+    from_statuses, so a second call (or a duplicate webhook) matches nothing and decrements nothing.
 
     ::param registration_id the registration to release
-    ::param new_status the final status to record ("expired" or "canceled")
+    ::param new_status the final status to record ("expired", "canceled" or "refunded")
     ::param db the Asynchronous database Session
     ::param expected_payment_intent_id the PaymentIntent the caller saw (and canceled) before releasing
     ::param check_payment_intent when True, skip the release if the registration's PaymentIntent changed
         since the caller looked, because the new one hasn't been canceled
+    ::param from_statuses the statuses allowed to be released (unpaid by default; ("paid",) for refunds)
 
     ::return True if this call released the slot
     """
 
     conditions = [
         EventRegistrations.id == registration_id,
-        EventRegistrations.payment_status.in_(UNPAID_HOLD_STATUSES),
+        EventRegistrations.payment_status.in_(from_statuses),
     ]
     if check_payment_intent:
         conditions.append(EventRegistrations.stripe_payment_intent_id.is_not_distinct_from(expected_payment_intent_id))

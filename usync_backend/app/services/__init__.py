@@ -21,7 +21,7 @@ EVENT_TYPES = [
 ]
 
 PLATFORM_FEE_PERCENT = 5
-REGISTRATION_STATUSES = ["pending", "paid", "payment_failed", "canceled", "expired"]
+REGISTRATION_STATUSES = ["pending", "paid", "payment_failed", "canceled", "expired", "refunded"]
 
 # Unpaid registrations hold their pass slot for this long, then the background sweeper releases it.
 REGISTRATION_HOLD_MINUTES = 30
