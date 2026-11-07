@@ -2,9 +2,10 @@ import uuid
 import logging
 
 from sqlalchemy import select, update
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 from stripe import StripeClient
-from app.models.event_registration import EventRegistrations, EventPassTiers
+from app.models.event_registration import EventRegistrations, EventPassTiers, PassPools
 from app.models.host_data import LanEvents
 from app.schemas.event_registration import EventPassesOut, EventSubmissionIn, EventSubmissionOut, PaymentIntentOut, ReceiptOut
 from collections.abc import Sequence
@@ -42,6 +43,7 @@ async def get_event_passes(path: str, db: AsyncSession) -> Sequence[EventPassesO
 
     pass_stmt = (
         select(EventPassTiers)
+        .options(selectinload(EventPassTiers.pool))
         .where(EventPassTiers.event_id == lan.event_id, EventPassTiers.is_active.is_(True))
     )
     pass_results = await db.execute(pass_stmt)
@@ -119,11 +121,28 @@ async def check_and_claim(registration: EventRegistrations, db: AsyncSession) ->
             (EventPassTiers.capacity.is_(None)) | (EventPassTiers.sold_count < EventPassTiers.capacity),
         )
         .values(sold_count=EventPassTiers.sold_count + 1)
-        .returning(EventPassTiers.id)
-    )   
-    claimed = (await db.execute(claim_stmt)).scalar_one_or_none()
+        .returning(EventPassTiers.pool_id)
+    )
+    claimed_tier = (await db.execute(claim_stmt)).one_or_none()
 
-    if claimed is None:
+    if claimed_tier is None:
+        raise HTTPException(status_code=409, detail="This pass is sold out")
+
+    pool_id = claimed_tier.pool_id
+    if pool_id is None:
+        return None
+
+    # Same atomic pattern on the shared pool row. Always tier first, then pool, so concurrent
+    # claims lock rows in the same order and can't deadlock. If the pool is full we raise and the
+    # session rolls back, which also undoes the tier increment above.
+    pool_stmt = (
+        update(PassPools)
+        .where(PassPools.id == pool_id, PassPools.sold_count < PassPools.capacity)
+        .values(sold_count=PassPools.sold_count + 1)
+        .returning(PassPools.id)
+    )
+    if (await db.execute(pool_stmt)).scalar_one_or_none() is None:
+        await db.rollback()
         raise HTTPException(status_code=409, detail="This pass is sold out")
 
     return None
