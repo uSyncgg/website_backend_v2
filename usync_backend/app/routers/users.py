@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.dependencies import get_db, verify_supabase_jwt, get_supabase, get_openai
 from app.core.limiter import limiter, STRICT_REGISTER, STRICT_USERNAME_CHECK, STRICT_ACCOUNT_CHANGE, STRICT_ACCOUNT_DELETE, MODERATE
 from app.schemas.users import (
+    ProfileEvent,
     RegistrationIn,
     RegistrationOut,
     ProfileIn,
@@ -18,6 +19,7 @@ from app.services.users import (
     handle_registration,
     check_valid_username,
     get_profile,
+    get_profile_events,
     get_me,
     get_profile_settings,
     add_profile,
@@ -99,6 +101,14 @@ async def getProfile(public_id: str, db: AsyncSession = Depends(get_db)):
     """
 
     return await get_profile(public_id, db)
+
+@router.get("/profiles/{public_id}/events", response_model = list[ProfileEvent])
+async def getProfileEvents(public_id: str, db: AsyncSession = Depends(get_db)):
+    """
+    The public events a host or venue profile's account owns on the site.
+    """
+
+    return await get_profile_events(public_id, db)
 
 @router.get("/me/profiles/{profile_type}", response_model = ProfileSettingsOut)
 async def getProfileSettings(
