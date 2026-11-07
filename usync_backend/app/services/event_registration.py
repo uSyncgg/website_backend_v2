@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from cachetools import TTLCache
 from app.services import PLATFORM_FEE_PERCENT, STRIPE_CURRENCY, STRIPE_PAYMENT_METHOD_TYPES
 from app.services.email import send_receipt_email, send_host_confirmation
+from app.services.registration_holds import hold_expired
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
@@ -221,7 +222,10 @@ async def get_or_create_payment_intent(registration_id: uuid.UUID, db: AsyncSess
 
     if registration.payment_status == "paid":
         raise HTTPException(status_code=409, detail="Registration already paid")
-        
+
+    if hold_expired(registration):
+        raise HTTPException(status_code=410, detail="Your reservation expired. Please register again.")
+
     if registration.stripe_payment_intent_id is not None:
         existing = await stripeClient.v1.payment_intents.retrieve_async(registration.stripe_payment_intent_id)
         if existing.status not in ("canceled", "succeeded"):
