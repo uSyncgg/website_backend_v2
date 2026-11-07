@@ -1,6 +1,5 @@
 import uuid
 import logging
-import io
 import base64
 import secrets
 import string
@@ -12,7 +11,6 @@ from pydantic import ValidationError
 from sqlalchemy import select, insert, update, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException, UploadFile
-from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.exc import IntegrityError
 from app.schemas.users import (
     RegistrationIn,
@@ -36,7 +34,8 @@ from app.schemas.users import (
     VenueUpdate
 )
 from app.models.users import UsersParent, Profiles, ProfileLinks, Players, Hosts, Venues
-from PIL import Image, ImageOps, UnidentifiedImageError
+from app.services.images import read_image_upload
+from app.services.event_claims import PROOF_BUCKET
 from supabase import AsyncClient
 from storage3.utils import StorageException
 from supabase_auth.errors import AuthApiError
@@ -45,8 +44,7 @@ from better_profanity import profanity
 
 logger = logging.getLogger(__name__)
 
-MAX_IMAGE_SIZE = 5 * 1024 * 1024
-ACCEPTED_IMAGE_TYPES = {"JPEG", "WEBP", "PNG"}
+PFP_SIZE = 512
 ALLOWED_SYMBOLS = {"_", ".", "-"}
 ALLOWED_CHAR_FORMATS = {"‌", "‍"}
 MIN_USER_LEN = 4
@@ -269,25 +267,6 @@ def _check_display_chars(username: str) -> None:
     return None
 
 
-def _sanitize_pfp(raw: bytes) -> bytes:
-    """
-    
-    """
-
-    with Image.open(io.BytesIO(raw)) as img:
-        if img.format not in ACCEPTED_IMAGE_TYPES:
-            raise ValueError("unsupported format")
-
-        if img.width * img.height > 25_000_000:
-            raise ValueError("image is too large")
-
-        img = ImageOps.exif_transpose(img).convert("RGBA")
-        img = ImageOps.fit(img, (512, 512), Image.Resampling.LANCZOS)
-        out = io.BytesIO()
-        img.save(out, "WEBP", quality = 85)
-
-        return out.getvalue()
-
 async def deposit_pfp(pfp: bytes, supabase: AsyncClient, user_id: str) -> tuple[str, str]:
     """
     
@@ -331,15 +310,7 @@ async def process_pfp(file: UploadFile, supabase: AsyncClient, user_id: str, ope
     
     """
 
-    raw = await file.read(MAX_IMAGE_SIZE + 1)
-
-    if len(raw) > MAX_IMAGE_SIZE:
-        raise HTTPException(status_code = 413, detail = "Image size is too large")
-
-    try:
-        pfp = await run_in_threadpool(_sanitize_pfp, raw)
-    except (ValueError, UnidentifiedImageError, Image.DecompressionBombError, OSError):
-        raise HTTPException(422, "Invalid image")
+    pfp = await read_image_upload(file, square = PFP_SIZE)
 
     try:
         await moderate_pfp(pfp, openai)
@@ -1035,13 +1006,15 @@ async def delete_account(user_id: str, db: AsyncSession, supabase: AsyncClient) 
         logger.exception("Failed to delete auth user %s", user_id)
         raise HTTPException(status_code=500, detail="Could not finish deleting your account. Please try again.")
 
-    try:
-        files = await supabase.storage.from_("profile_pictures").list(user_id)
-        paths = [f"{user_id}/{f['name']}" for f in files]
+    # Each bucket keeps a user's files under a <user_id>/ folder.
+    for bucket in ("profile_pictures", PROOF_BUCKET):
+        try:
+            files = await supabase.storage.from_(bucket).list(user_id)
+            paths = [f"{user_id}/{f['name']}" for f in files]
 
-        if paths:
-            await supabase.storage.from_("profile_pictures").remove(paths)
-    except Exception:
-        logger.exception("Failed to remove stored files for deleted user %s", user_id)
+            if paths:
+                await supabase.storage.from_(bucket).remove(paths)
+        except Exception:
+            logger.exception("Failed to remove stored %s files for deleted user %s", bucket, user_id)
 
     return None
