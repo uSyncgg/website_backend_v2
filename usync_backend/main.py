@@ -27,10 +27,12 @@ from app.routers import users
 from app.routers import event_claims
 from app.routers import teams
 from app.routers import brackets
+from app.routers import chat
 
 from app.services import GAMES, STRIPE_SECRET_KEY, EVENT_TYPES
 from app.services.sitemap import get_sitemap_xml
 from app.services.registration_holds import run_hold_sweeper
+from app.services.chat_rooms import run_chat_sweeper
 from app.services.events import populate_verified_events_cache, populate_verified_events_type_cache
 
 load_dotenv()
@@ -62,14 +64,16 @@ async def lifespan(app: FastAPI):
         await populate_verified_events_type_cache(db, app.state.verified_cache)
 
     hold_sweeper = asyncio.create_task(run_hold_sweeper(app.state.stripe))
+    chat_sweeper = asyncio.create_task(run_chat_sweeper())
 
     yield
 
-    hold_sweeper.cancel()
-    try:
-        await hold_sweeper
-    except asyncio.CancelledError:
-        pass
+    for task in (hold_sweeper, chat_sweeper):
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     await engine.dispose()
 
@@ -104,3 +108,4 @@ app.include_router(event_claims.router)
 app.include_router(teams.router)
 app.include_router(brackets.router)
 app.include_router(brackets.notifications_router)
+app.include_router(chat.router)
