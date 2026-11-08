@@ -24,6 +24,7 @@ from app.routers import sitemap
 from app.routers import event_registration
 from app.routers import webhooks
 from app.routers import users
+from app.routers import admin
 from app.routers import event_claims
 
 from app.services import GAMES, STRIPE_SECRET_KEY, EVENT_TYPES
@@ -98,4 +99,5 @@ app.include_router(sitemap.router)
 app.include_router(event_registration.router)
 app.include_router(webhooks.router)
 app.include_router(users.router)
+app.include_router(admin.router)
 app.include_router(event_claims.router)

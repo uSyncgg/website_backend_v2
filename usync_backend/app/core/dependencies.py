@@ -1,16 +1,23 @@
 import os
 import jwt
+import logging
 import secrets
+import uuid
 
 from collections.abc import AsyncGenerator
 from sqlalchemy.ext.asyncio import AsyncSession
 from stripe import StripeClient
 from fastapi import Request, Header, HTTPException, status, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from sqlalchemy import select, text
 from .db import AsyncSessionLocal
+from app.models.admin import Admins, AdminAuditLog
+from app.models.users import UsersParent
 from cachetools import TTLCache
 from supabase import AsyncClient
 from openai import AsyncOpenAI
+
+logger = logging.getLogger(__name__)
 
 bearer_scheme = HTTPBearer()
 optional_bearer_scheme = HTTPBearer(auto_error = False)
@@ -22,6 +29,19 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
     async with AsyncSessionLocal() as session:
         yield session
+
+async def get_readonly_db() -> AsyncGenerator[AsyncSession, None]:
+    """
+    Session for admin reads. The transaction is marked READ ONLY, so Postgres rejects any
+    INSERT/UPDATE/DELETE run through it, and it is always rolled back.
+    """
+
+    async with AsyncSessionLocal() as session:
+        await session.execute(text("SET TRANSACTION READ ONLY"))
+        try:
+            yield session
+        finally:
+            await session.rollback()
 
 def get_stripe_client(request: Request) -> StripeClient:
     """
@@ -122,3 +142,39 @@ def get_openai(request: Request) -> AsyncOpenAI:
     """
 
     return request.app.state.openai
+
+async def require_admin(
+    request: Request,
+    claims: dict = Depends(verify_supabase_jwt),
+    db: AsyncSession = Depends(get_db)
+) -> dict:
+    """
+    Allow only accounts listed in the admins table, and record each allowed request in
+    admin_audit_log. Runs on its own read/write session because the admin read routes use
+    get_readonly_db, which can't write. The log commits before the route runs, so if it can't
+    be written the data isn't returned. Denied requests only go to the application logs:
+    anyone can trigger those, so they must not be able to grow a table.
+
+    ::param request the Request object, for the path being read
+    ::param claims the verified Supabase token claims
+    ::param db a read/write session
+
+    ::return the token claims
+    """
+
+    user_id = uuid.UUID(claims["sub"])
+
+    email = await db.scalar(
+        select(UsersParent.email)
+        .join(Admins, Admins.user_id == UsersParent.id)
+        .where(Admins.user_id == user_id)
+    )
+
+    if email is None:
+        logger.warning("Denied admin access: user=%s path=%s", user_id, request.url.path)
+        raise HTTPException(status_code = status.HTTP_403_FORBIDDEN, detail = "Admins only")
+
+    db.add(AdminAuditLog(admin_id = user_id, admin_email = email, action = f"view:{request.url.path}"))
+    await db.commit()
+
+    return claims
