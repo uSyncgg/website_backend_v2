@@ -1,18 +1,25 @@
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.dependencies import get_readonly_db, require_admin
 from app.core.limiter import limiter, MODERATE
 from app.schemas.admin import AdminAccountsOut, AdminAnalyticsOut, AdminEventsOut
 from app.services.admin import get_admin_accounts, get_admin_analytics, get_admin_events
 
-# Admin dashboard reads. GET only, admins only (ADMIN_EMAILS), and the session is READ ONLY.
+# Admin dashboard reads. GET only, admins only (the admins table), and the session is READ ONLY.
 router = APIRouter(prefix="/admin", tags=["Admin"])
+
+@router.get("/access", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit(MODERATE)
+async def adminAccess(request: Request, response: Response, claims: dict = Depends(require_admin)) -> None:
+    """
+    204 for admins, 403 for everyone else. The frontend calls this before showing the dashboard.
+    """
 
 @router.get("/analytics", response_model=AdminAnalyticsOut)
 @limiter.limit(MODERATE)
 async def adminAnalytics(request: Request, response: Response, claims: dict = Depends(require_admin), db: AsyncSession = Depends(get_readonly_db)):
     """
-    Account totals, daily sign-ups, and games picked at sign-up.
+    Account totals, daily sign-ups, and the games listed on profiles.
     """
 
     return await get_admin_analytics(db)

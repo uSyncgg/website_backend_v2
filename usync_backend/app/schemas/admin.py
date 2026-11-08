@@ -3,7 +3,11 @@ from uuid import UUID
 from pydantic import BaseModel
 
 class RoleTotals(BaseModel):
+    # Every sign-up (auth.users), including ones that never finished.
     total: int
+    # Sign-ups with no users row, no profile, or a profile missing its details.
+    unfinished: int
+    # Completed profiles of each type. One account can have several.
     players: int
     hosts: int
     venues: int
@@ -11,6 +15,7 @@ class RoleTotals(BaseModel):
 class SignupDay(RoleTotals):
     date: date
 
+# Game -> number of profiles listing it now. Each profile counts once per game.
 class GameInterest(BaseModel):
     players: dict[str, int]
     hosts: dict[str, int]
