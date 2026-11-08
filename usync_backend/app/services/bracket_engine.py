@@ -279,3 +279,54 @@ def progress(built: dict) -> tuple[int, int]:
 
 def ready_matches(built: dict) -> list[dict]:
     return [m for m in all_matches(built) if m["status"] == "ready"]
+
+
+def placements(fmt: str, seeds: list, built: dict) -> list | None:
+    """
+    Final placings once the event is decided: [1st, 2nd, 3rd] (2nd and 3rd may be None). Same rules
+    as the frontend's placements(): single elim gives 3rd to the semifinal loser who lost to the
+    champion; double elim gives 2nd to the grand final loser and 3rd to the losers final loser;
+    round robin and swiss use the top three of the standings once every match is played. None
+    until the event is decided.
+    """
+
+    if fmt in ("round_robin", "swiss"):
+        done, total = progress(built)
+        if not total or done < total:
+            return None
+        top = [row["id"] for row in standings_of(seeds, all_matches(built))[:3]]
+        return top + [None] * (3 - len(top))
+
+    champion = built.get("champion")
+    if not champion:
+        return None
+
+    if fmt == "double_elim":
+        grand = built["grandFinal"][-1]
+        losers_final = built["losersRounds"][-1][0] if built.get("losersRounds") else None
+        second = grand["loser"] if grand["status"] == "complete" else None
+        third = losers_final["loser"] if losers_final and is_entrant(losers_final.get("loser")) else None
+        return [champion, second, third]
+
+    rounds = built["rounds"]
+    final = rounds[-1][0]
+    semis = rounds[-2] if len(rounds) >= 2 else []
+    champions_semi = next((m for m in semis if m["winner"] == champion), None)
+    third = champions_semi["loser"] if champions_semi and is_entrant(champions_semi.get("loser")) else None
+    return [champion, final["loser"] if is_entrant(final.get("loser")) else None, third]
+
+
+def match_record(built: dict, entry_id: str) -> tuple[int, int]:
+    """
+    (wins, losses) for one entrant over the matches actually played (byes don't count).
+    """
+
+    wins = losses = 0
+    for m in all_matches(built):
+        if m["status"] != "complete":
+            continue
+        if m["winner"] == entry_id:
+            wins += 1
+        elif m["loser"] == entry_id:
+            losses += 1
+    return wins, losses

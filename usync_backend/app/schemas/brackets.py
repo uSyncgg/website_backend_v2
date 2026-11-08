@@ -1,8 +1,9 @@
 import uuid
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Annotated
-from pydantic import StringConstraints, BaseModel, ConfigDict, Field, field_validator
+from pydantic import StringConstraints, BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.alias_generators import to_camel
 
 # Request bodies for /brackets. The frontend speaks camelCase (it's the same shape the bracket
@@ -22,6 +23,17 @@ class SignupForm(CamelModel):
     questions: list[SignupQuestion] = Field(default_factory = list, max_length = 20)
 
 Restriction = Annotated[str, StringConstraints(strip_whitespace = True, min_length = 1, max_length = 200)]
+
+class Prize(CamelModel):
+    place: int = Field(ge = 1, le = 3)
+    amount: Decimal | None = Field(default = None, gt = 0, max_digits = 9, decimal_places = 2)
+    percent: Decimal | None = Field(default = None, gt = 0, le = 100, max_digits = 5, decimal_places = 2)
+
+    @model_validator(mode = "after")
+    def one_kind(self):
+        if (self.amount is None) == (self.percent is None):
+            raise ValueError("A prize is either a dollar amount or a percent of the entry revenue.")
+        return self
 
 class EventCreate(CamelModel):
     host_profile: str
@@ -48,6 +60,7 @@ class EventCreate(CamelModel):
     registration_open: bool = True
     no_show_minutes: int | None = Field(default = None, ge = 0, le = 240)
     payments: dict = Field(default_factory = dict)
+    prizes: list[Prize] = Field(default_factory = list, max_length = 3)
     signup_form: SignupForm = Field(default_factory = SignupForm)
 
 class EventUpdate(CamelModel):
@@ -64,6 +77,7 @@ class EventUpdate(CamelModel):
     restrictions: list[Restriction] | None = Field(default = None, max_length = 10)
     registration_open: bool | None = None
     no_show_minutes: int | None = Field(default = None, ge = 0, le = 240)
+    prizes: list[Prize] | None = Field(default = None, max_length = 3)
 
 class EventDelay(CamelModel):
     starts_at: datetime
@@ -74,6 +88,7 @@ class Registration(CamelModel):
     email: str = Field(max_length = 200)
     answers: dict[str, str] = Field(default_factory = dict)
     pass_name: str | None = Field(default = None, alias = "pass", max_length = 80)
+    pay_for: list[str] = Field(default_factory = list, max_length = 10)
 
     @field_validator("email")
     @classmethod
