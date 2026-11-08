@@ -6,7 +6,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.db import AsyncSessionLocal
 from app.models.brackets import BracketEvents
-from app.models.chat import MatchChatRooms, MatchChatMessages, MatchChatAdmins
+from app.models.chat import MatchChatRooms, MatchChatMessages, MatchChatAdmins, ChatReports
 from app.services import bracket_engine as engine
 
 logger = logging.getLogger(__name__)
@@ -16,16 +16,34 @@ logger = logging.getLogger(__name__)
 # bracket is published or changes, so every match has a room as soon as the bracket is out, and
 # reset_bracket calls delete_event_rooms.
 #
-# Chats are not kept forever: when every match of an event has been played its rooms get an
-# expires_at three days out, and the sweeper started in main.py's lifespan deletes them (their
-# messages and admin joins go with them). A result that is undone clears the clock again.
+# Chats are not kept forever. When every match of an event has been played its rooms get an
+# expires_at three days out (and turn read-only, see event_finished); an event that never
+# finishes is cleaned up 30 days after its start date. The sweeper started in main.py's
+# lifespan deletes expired rooms (their messages and admin joins go with them). A result that is
+# undone moves the clock back to the 30-day backstop.
+#
+# Reports filed against messages (app.models.chat.ChatReports) keep their own copy so staff can
+# still review them; the sweeper deletes those a year after they were reviewed.
 
 CHAT_RETENTION = timedelta(days = 3)
+CHAT_BACKSTOP = timedelta(days = 30)
+REPORT_RETENTION = timedelta(days = 365)
 CHAT_SWEEP_INTERVAL_SECONDS = 3600
 SWEEP_BATCH_SIZE = 200
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+def event_finished(event: BracketEvents) -> bool:
+    """
+    Whether every match of a published bracket has been played. Chats turn read-only then.
+    """
+
+    if not (event.bracket and event.bracket.get("published")):
+        return False
+    built = engine.build_bracket(event.bracket["format"], event.bracket["seeds"], event.bracket.get("results", {}))
+    done, total = engine.progress(built)
+    return total > 0 and done == total
 
 def _playable(match: dict) -> bool:
     return match["status"] not in ("bye", "empty")
@@ -87,11 +105,13 @@ async def sync_rooms(db: AsyncSession, event: BracketEvents) -> dict[str, MatchC
     done, total = engine.progress(built)
     finished = total > 0 and done == total
     deadline = _now() + CHAT_RETENTION
+    backstop = event.starts_at + CHAT_BACKSTOP
     for room in rooms.values():
         if finished:
-            room.expires_at = room.expires_at or deadline
+            # Three days from the moment it finished; later syncs never push that back.
+            room.expires_at = min(room.expires_at, deadline) if room.expires_at else deadline
         else:
-            room.expires_at = None
+            room.expires_at = backstop
 
     await db.flush()
     return rooms
@@ -152,6 +172,17 @@ async def purge_expired(db: AsyncSession) -> int:
     await db.commit()
     return len(ids)
 
+async def purge_old_reports(db: AsyncSession) -> int:
+    """
+    Deletes reports staff finished with more than a year ago. Open reports are never deleted.
+    """
+
+    result = await db.execute(
+        delete(ChatReports).where(ChatReports.status != "open").where(ChatReports.reviewed_at <= _now() - REPORT_RETENTION)
+    )
+    await db.commit()
+    return result.rowcount or 0
+
 async def run_chat_sweeper() -> None:
     """
     Background loop started in main.py's lifespan: deletes expired chats at startup, then hourly.
@@ -166,8 +197,9 @@ async def run_chat_sweeper() -> None:
                 while deleted == SWEEP_BATCH_SIZE:
                     deleted = await purge_expired(db)
                     total += deleted
-            if total:
-                logger.info("Chat sweeper deleted %d expired match chat(s)", total)
+                reports = await purge_old_reports(db)
+            if total or reports:
+                logger.info("Chat sweeper deleted %d expired match chat(s) and %d old report(s)", total, reports)
         except Exception:
             logger.exception("Chat sweeper run failed")
 

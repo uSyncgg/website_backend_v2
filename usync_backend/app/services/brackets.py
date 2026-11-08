@@ -493,6 +493,7 @@ async def delay_start(user_id: str, public_id: str, body: EventDelay, db: AsyncS
     event = await _host_event(user_id, public_id, db, lock = True)
     event.delays = [*(event.delays or []), {"from": _iso(event.starts_at), "to": _iso(body.starts_at), "reason": body.reason.strip(), "at": _iso(_now())}]
     event.starts_at = body.starts_at
+    await chat_rooms.sync_rooms(db, event)
 
     entries = await _entries(event.id, db)
     accounts = await _entry_accounts(entries, db)

@@ -4,6 +4,7 @@ from datetime import datetime
 from app.models.base import Base
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, DateTime, Index, UniqueConstraint, text
+from sqlalchemy.dialects.postgresql import JSONB
 
 class MatchChatRooms(Base):
     """
@@ -45,6 +46,9 @@ class MatchChatMessages(Base):
     joined"). sender_name is kept on the row so the line still reads right after a profile is
     renamed or the account is closed; sender_account_id goes NULL when the account is deleted.
     The bigint id doubles as the polling cursor.
+
+    An admin can hide a player's message (hidden_at): players then see a placeholder, admins still
+    see the text. Hiding files a report with uSync staff automatically (see ChatReports).
     """
 
     __tablename__ = "match_chat_messages"
@@ -56,6 +60,9 @@ class MatchChatMessages(Base):
     sender_name: Mapped[str | None] = mapped_column(nullable = True)
     sender_role: Mapped[str | None] = mapped_column(nullable = True)
     body: Mapped[str] = mapped_column()
+    hidden_at: Mapped[datetime | None] = mapped_column(DateTime(timezone = True), nullable = True)
+    hidden_by_account_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete = "SET NULL"), nullable = True)
+    hidden_by_name: Mapped[str | None] = mapped_column(nullable = True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = text("now()"))
 
     __table_args__ = (
@@ -80,4 +87,47 @@ class MatchChatAdmins(Base):
 
     __table_args__ = (
         UniqueConstraint("room_id", "account_id", name = "uq_match_chat_admins"),
+    )
+
+class ChatReports(Base):
+    """
+    SQL Alchemy model describing the chat_reports table: a message flagged to uSync staff (never
+    to the event's admins). source is 'player' (someone in the chat reported it) or 'admin_hide'
+    (an admin hid it, which reports it automatically).
+
+    A report has to outlive the chat, which is deleted 3 days after the event, so it keeps its own
+    copy of the message and a few lines around it (context) and plain-text names; the room and
+    message links go NULL when the chat is deleted. Staff work the queue in the admin dashboard's
+    Moderation tab. Resolved reports are deleted a year after they were reviewed.
+    """
+
+    __tablename__ = "chat_reports"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
+    source: Mapped[str] = mapped_column()
+    category: Mapped[str] = mapped_column()
+    note: Mapped[str | None] = mapped_column(nullable = True)
+    status: Mapped[str] = mapped_column(default = "open", server_default = text("'open'"))
+    reporter_account_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete = "SET NULL"), nullable = True)
+    reporter_name: Mapped[str | None] = mapped_column(nullable = True)
+    message_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("match_chat_messages.id", ondelete = "SET NULL"), nullable = True)
+    room_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("match_chat_rooms.id", ondelete = "SET NULL"), nullable = True)
+    event_public_id: Mapped[str] = mapped_column()
+    event_name: Mapped[str] = mapped_column()
+    match_id: Mapped[str] = mapped_column()
+    sender_account_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete = "SET NULL"), nullable = True)
+    sender_name: Mapped[str | None] = mapped_column(nullable = True)
+    sender_role: Mapped[str | None] = mapped_column(nullable = True)
+    message_body: Mapped[str] = mapped_column()
+    context: Mapped[list] = mapped_column(JSONB, default = list, server_default = text("'[]'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = text("now()"))
+    reviewed_by_email: Mapped[str | None] = mapped_column(nullable = True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone = True), nullable = True)
+    resolution_note: Mapped[str | None] = mapped_column(nullable = True)
+
+    __table_args__ = (
+        UniqueConstraint("message_id", "reporter_account_id", name = "uq_chat_reports_reporter"),
+        CheckConstraint("source IN ('player', 'admin_hide')", name = "ck_chat_reports_source"),
+        CheckConstraint("status IN ('open', 'actioned', 'dismissed')", name = "ck_chat_reports_status"),
+        Index("ix_chat_reports_status_created", "status", "created_at"),
     )

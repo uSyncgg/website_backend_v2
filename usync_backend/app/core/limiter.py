@@ -12,6 +12,7 @@ STRICT_PAYMENT = "10/minute"
 STRICT_ACCOUNT_CHANGE = "10/hour"
 STRICT_ACCOUNT_DELETE = "5/hour"
 STRICT_CHAT_MESSAGE = "20/minute"
+STRICT_CHAT_REPORT = "10/hour"
 
 ### Moderate tier: authenticated actions and reads that expose individual records.
 MODERATE = "60/minute"

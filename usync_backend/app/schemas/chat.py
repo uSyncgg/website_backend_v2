@@ -1,3 +1,4 @@
+from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 from app.services.chat_filters import MAX_MESSAGE_LENGTH
 
@@ -13,3 +14,11 @@ class ChatMessageIn(BaseModel):
         if not v:
             raise ValueError("Type a message first.")
         return v
+
+class ChatReportIn(BaseModel):
+    category: Literal["harassment", "hate", "sexual", "threats", "spam", "other"]
+    note: str | None = Field(default = None, max_length = 300)
+
+class ChatReportResolve(BaseModel):
+    action: Literal["actioned", "dismissed"]
+    note: str | None = Field(default = None, max_length = 500)

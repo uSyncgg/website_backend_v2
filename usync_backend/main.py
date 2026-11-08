@@ -29,6 +29,7 @@ from app.routers import event_claims
 from app.routers import teams
 from app.routers import brackets
 from app.routers import chat
+from app.routers import chat_moderation
 
 from app.services import GAMES, STRIPE_SECRET_KEY, EVENT_TYPES
 from app.services.sitemap import get_sitemap_xml
@@ -111,3 +112,4 @@ app.include_router(teams.router)
 app.include_router(brackets.router)
 app.include_router(brackets.notifications_router)
 app.include_router(chat.router)
+app.include_router(chat_moderation.router)

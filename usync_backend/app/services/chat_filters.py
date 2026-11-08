@@ -199,6 +199,23 @@ def check_words(text: str) -> str | None:
             return _NOT_ALLOWED
     return None
 
+# ---- spam ----------------------------------------------------------------------
+
+MAX_LINKS_PER_MESSAGE = 2
+_REPEAT_RE = re.compile(r"(.)\1{9,}")
+
+def check_spam(text: str) -> str | None:
+    """
+    Shape checks for spammy messages: too many links, or a character held down ("aaaaaaaaaaaa").
+    How often someone sends is limited separately, in app.services.chat.
+    """
+
+    if len(URL_RE.findall(text)) > MAX_LINKS_PER_MESSAGE:
+        return f"Please keep it to {MAX_LINKS_PER_MESSAGE} links per message."
+    if _REPEAT_RE.search(text):
+        return "That message looks like spam. Please reword it."
+    return None
+
 # ---- OpenAI --------------------------------------------------------------------
 
 # Categories worth rejecting a chat line for. Plain "violence" is left out: it's how people
@@ -234,7 +251,7 @@ async def screen_message(text: str, openai: AsyncOpenAI | None = None) -> str | 
     rejections never reach OpenAI.
     """
 
-    reason = check_words(text) or check_links(text)
+    reason = check_spam(text) or check_words(text) or check_links(text)
     if reason or openai is None:
         return reason
     return await check_moderation(text, openai)

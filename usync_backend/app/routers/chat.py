@@ -2,8 +2,8 @@ from fastapi import APIRouter, Depends, Query, Request, Response
 from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.dependencies import get_db, get_openai, verify_supabase_jwt
-from app.core.limiter import limiter, MODERATE, STRICT_CHAT_MESSAGE
-from app.schemas.chat import ChatMessageIn
+from app.core.limiter import limiter, MODERATE, STRICT_CHAT_MESSAGE, STRICT_CHAT_REPORT
+from app.schemas.chat import ChatMessageIn, ChatReportIn
 from app.services import chat as svc
 
 # Match chat rooms. One room per match, reached from the match page; polled by the frontend
@@ -30,3 +30,18 @@ async def requestAdmin(request: Request, response: Response, event_id: str, matc
 @limiter.limit(MODERATE)
 async def joinChat(request: Request, response: Response, event_id: str, match_id: str, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
     return await svc.join_chat(claims["sub"], event_id, match_id, db)
+
+@router.post("/leave")
+@limiter.limit(MODERATE)
+async def leaveChat(request: Request, response: Response, event_id: str, match_id: str, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
+    return await svc.leave_chat(claims["sub"], event_id, match_id, db)
+
+@router.post("/messages/{message_id}/hide")
+@limiter.limit(MODERATE)
+async def hideMessage(request: Request, response: Response, event_id: str, match_id: str, message_id: int, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
+    return await svc.hide_message(claims["sub"], event_id, match_id, message_id, db)
+
+@router.post("/messages/{message_id}/report")
+@limiter.limit(STRICT_CHAT_REPORT)
+async def reportMessage(request: Request, response: Response, event_id: str, match_id: str, message_id: int, body: ChatReportIn, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
+    return await svc.report_message(claims["sub"], event_id, match_id, message_id, body.category, body.note, db)
