@@ -226,12 +226,26 @@ async def _player_by_username(username: str, db: AsyncSession) -> Profiles:
 
     return player
 
+async def _invitable_player(user_id: str, username: str, db: AsyncSession) -> Profiles:
+    """
+    The player profile to invite, by username. You can't invite your own account's player
+    profile (a player who makes a team is already on it as captain).
+    """
+
+    player = await _player_by_username(username, db)
+
+    if str(player.account_id) == str(user_id):
+        raise HTTPException(status_code=409, detail="You can't invite yourself to a team.")
+
+    return player
+
 async def _team_view(user_id: str, team: Teams, db: AsyncSession) -> TeamOut:
     return (await _teams_out([team], db, user_id, include_invites = True))[0]
 
-async def search_players(query: str, db: AsyncSession) -> list[ProfileSummary]:
+async def search_players(query: str, user_id: str, db: AsyncSession) -> list[ProfileSummary]:
     """
     Player profiles whose username starts with (then contains) the query, for inviting.
+    The signed in account's own player profile is left out (you can't invite yourself).
     """
 
     q = _canonical_username(query)
@@ -243,6 +257,7 @@ async def search_players(query: str, db: AsyncSession) -> list[ProfileSummary]:
     rows = (await db.execute(
         select(Profiles)
         .where(Profiles.type == "player")
+        .where(Profiles.account_id != user_id)
         .where(Profiles.canonical_username.like(f"%{escaped}%", escape = "\\"))
         .order_by(~Profiles.canonical_username.like(f"{escaped}%", escape = "\\"), Profiles.canonical_username)
         .limit(SEARCH_LIMIT)
@@ -282,7 +297,7 @@ async def create_team(
     invitees: dict = {}
 
     for username in body.invites:
-        player = await _player_by_username(username, db)
+        player = await _invitable_player(user_id, username, db)
         invitees[player.id] = player
 
     owner_id = owner.id
@@ -300,7 +315,7 @@ async def create_team(
         # A player who makes their own team is on it as its captain.
         if body.owner_type == "player":
             db.add(TeamMembers(team_id = team.id, profile_id = owner_id, role = "captain"))
-        db.add_all([TeamInvites(team_id = team.id, profile_id = pid) for pid in invitees if pid != owner_id])
+        db.add_all([TeamInvites(team_id = team.id, profile_id = pid) for pid in invitees])
         await db.commit()
     except IntegrityError:
         await db.rollback()
@@ -381,7 +396,7 @@ async def invite_player(user_id: str, team_public_id: str, username: str, db: As
     """
 
     team = await _owned_team(user_id, team_public_id, db)
-    player = await _player_by_username(username, db)
+    player = await _invitable_player(user_id, username, db)
 
     on_team = (await db.execute(
         select(TeamMembers.profile_id).where(TeamMembers.team_id == team.id).where(TeamMembers.profile_id == player.id)
@@ -390,12 +405,16 @@ async def invite_player(user_id: str, team_public_id: str, username: str, db: As
     if on_team:
         raise HTTPException(status_code=409, detail=f"{player.username} is already on {team.name}.")
 
+    # Read before the write: a rollback expires the loaded rows, and reading them afterwards
+    # would need IO the async session can't do there.
+    duplicate = f"{player.username} already has an invite to {team.name}."
+
     try:
         db.add(TeamInvites(team_id = team.id, profile_id = player.id))
         await db.commit()
     except IntegrityError:
         await db.rollback()
-        raise HTTPException(status_code=409, detail=f"{player.username} already has an invite to {team.name}.")
+        raise HTTPException(status_code=409, detail=duplicate)
 
     return await _team_view(user_id, team, db)
 

@@ -70,7 +70,7 @@ async def searchPlayers(request: Request, response: Response, q: str, claims: di
     Player profiles matching `q`, for the invite picker.
     """
 
-    return await search_players(q, db)
+    return await search_players(q, claims["sub"], db)
 
 @router.post("", response_model = TeamOut)
 @limiter.limit(STRICT_ACCOUNT_CHANGE)
