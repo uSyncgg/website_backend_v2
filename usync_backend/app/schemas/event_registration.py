@@ -13,6 +13,9 @@ class EventPassesOut(BaseModel):
     is_active: bool
     capacity: int | None
     sold_count: int
+    pool_id: uuid.UUID | None = None
+    pool_capacity: int | None = None
+    pool_sold_count: int | None = None
     requires_team: bool
     form_fields: list[dict]
     player_fields: list[dict]

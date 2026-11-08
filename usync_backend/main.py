@@ -1,4 +1,5 @@
 import os
+import asyncio
 import logging
 
 from fastapi import FastAPI
@@ -24,9 +25,11 @@ from app.routers import event_registration
 from app.routers import webhooks
 from app.routers import users
 from app.routers import admin
+from app.routers import event_claims
 
 from app.services import GAMES, STRIPE_SECRET_KEY, EVENT_TYPES
 from app.services.sitemap import get_sitemap_xml
+from app.services.registration_holds import run_hold_sweeper
 from app.services.events import populate_verified_events_cache, populate_verified_events_type_cache
 
 load_dotenv()
@@ -57,7 +60,15 @@ async def lifespan(app: FastAPI):
         await populate_verified_events_cache(db, app.state.verified_cache)
         await populate_verified_events_type_cache(db, app.state.verified_cache)
 
+    hold_sweeper = asyncio.create_task(run_hold_sweeper(app.state.stripe))
+
     yield
+
+    hold_sweeper.cancel()
+    try:
+        await hold_sweeper
+    except asyncio.CancelledError:
+        pass
 
     await engine.dispose()
 
@@ -89,3 +100,4 @@ app.include_router(event_registration.router)
 app.include_router(webhooks.router)
 app.include_router(users.router)
 app.include_router(admin.router)
+app.include_router(event_claims.router)

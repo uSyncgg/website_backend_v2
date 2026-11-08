@@ -1,4 +1,5 @@
 import os
+import html
 import resend
 import uuid
 
@@ -101,6 +102,63 @@ async def send_host_confirmation(to: str, event_name: str, player_info: list[dic
         "to": [to],
         "subject": f"New sign-up for {event_name}",
         "html": html,
+    })
+
+    return None
+
+CLAIMS_INBOX = "contact@usync.gg"
+
+async def send_event_claim_notification(
+        claim_id: uuid.UUID,
+        event_name: str,
+        event_type: str,
+        event_id: uuid.UUID,
+        claimant_email: str | None,
+        role: str,
+        contact_method: str,
+        contact: str,
+        description: str,
+        proof_path: str,
+        proof_url: str | None
+) -> None:
+    """
+    Asynchronous function to tell the uSync team a host has claimed an event and needs review.
+
+    Everything the host typed is HTML-escaped: it goes into our own inbox, so it must not be able
+    to inject links or markup into the email.
+
+    ::param proof_url a short-lived signed link to the private proof image, or None if one
+    couldn't be made (the proof_path still finds it in Supabase Storage)
+    """
+
+    e = html.escape
+
+    proof = (
+        f'<p><a href="{e(proof_url)}">View proof picture</a> (link expires in 7 days)</p>'
+        if proof_url else ""
+    )
+
+    body = f"""
+    <html>
+    <body style="font-family: sans-serif; color: #111111;">
+        <h2>New event claim: {e(event_name)}</h2>
+        <p><strong>Event:</strong> {e(event_name)} ({e(event_type)}) &middot; {e(str(event_id))}</p>
+        <p><strong>Account email:</strong> {e(claimant_email or "unknown")}</p>
+        <p><strong>Role:</strong> {e(role)}</p>
+        <p><strong>Contact ({e(contact_method)}):</strong> {e(contact)}</p>
+        <h3>How the proof shows they run it</h3>
+        <p style="white-space: pre-wrap;">{e(description)}</p>
+        {proof}
+        <p style="color:#555555;">Claim {e(str(claim_id))} &middot; proof at event_proof_images/{e(proof_path)}</p>
+    </body>
+    </html>
+    """
+
+    await resend.Emails.send_async({
+        "from": FROM_EMAIL,
+        "to": [CLAIMS_INBOX],
+        "subject": f"New event claim: {event_name}",
+        "html": body,
     })
 
     return None
