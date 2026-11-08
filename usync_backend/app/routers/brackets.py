@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.dependencies import get_db, verify_supabase_jwt, optional_supabase_jwt
 from app.core.limiter import limiter, MODERATE
-from app.schemas.brackets import EventCreate, EventUpdate, EventDelay, Registration, SeedsUpdate, MatchScore, NotificationsRead
+from app.schemas.brackets import EventCreate, EventUpdate, EventDelay, Registration, SeedsUpdate, MatchScore, NotificationsRead, AdminInvite, AdminResponse
 from app.services import brackets as svc
 from app.services.notifications import list_notifications, mark_read
 
@@ -26,6 +26,14 @@ async def getHostingEvents(claims: dict = Depends(verify_supabase_jwt), db: Asyn
 @router.get("/entered")
 async def getEnteredEvents(claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
     return await svc.entered_events(claims["sub"], db)
+
+@router.get("/admin-invites")
+async def getAdminInvites(claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
+    return await svc.my_admin_invites(claims["sub"], db)
+
+@router.post("/admin-invites/{invite_id}")
+async def respondAdminInvite(invite_id: uuid.UUID, body: AdminResponse, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
+    return await svc.respond_admin_invite(claims["sub"], invite_id, body.accept, db)
 
 @router.get("/profile/{public_id}")
 async def getProfileEvents(public_id: str, claims: dict | None = Depends(optional_supabase_jwt), db: AsyncSession = Depends(get_db)):
@@ -54,6 +62,15 @@ async def deleteEvent(event_id: str, claims: dict = Depends(verify_supabase_jwt)
 @limiter.limit(MODERATE)
 async def delayEvent(request: Request, response: Response, event_id: str, body: EventDelay, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
     return await svc.delay_start(claims["sub"], event_id, body, db)
+
+@router.post("/{event_id}/admins")
+@limiter.limit(MODERATE)
+async def inviteAdmin(request: Request, response: Response, event_id: str, body: AdminInvite, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
+    return await svc.invite_admin(claims["sub"], event_id, body, db)
+
+@router.delete("/{event_id}/admins/{admin_id}")
+async def removeAdmin(event_id: str, admin_id: uuid.UUID, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
+    return await svc.remove_admin(claims["sub"], event_id, admin_id, db)
 
 @router.delete("/{event_id}/entrants/{entrant_id}")
 async def removeEntrant(event_id: str, entrant_id: uuid.UUID, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):

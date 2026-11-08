@@ -9,10 +9,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.users import Profiles
 from app.models.teams import Teams, TeamMembers
-from app.models.brackets import BracketEvents, BracketEntries
+from app.models.brackets import BracketEvents, BracketEntries, BracketEventAdmins
 from app.services import bracket_engine as engine
 from app.services.notifications import notify
-from app.schemas.brackets import EventCreate, EventUpdate, EventDelay, Registration, MatchScore
+from app.schemas.brackets import EventCreate, EventUpdate, EventDelay, Registration, MatchScore, AdminInvite
 
 # Bracket hosting: events a host or venue profile runs, their sign-ups and their brackets.
 #
@@ -84,9 +84,31 @@ async def _my_team_roles(user_id: str | None, db: AsyncSession) -> dict:
         roles[team_id] = "owner"
     return roles
 
+async def _admin_event_ids(user_id: str | None, db: AsyncSession) -> set:
+    """
+    Events one of the signed in account's profiles has accepted an admin invite for.
+    """
+
+    if not user_id:
+        return set()
+    mine = select(Profiles.id).where(Profiles.account_id == user_id)
+    return set((await db.execute(
+        select(BracketEventAdmins.event_id).where(BracketEventAdmins.profile_id.in_(mine)).where(BracketEventAdmins.status == "accepted")
+    )).scalars().all())
+
 async def _host_event(user_id: str, public_id: str, db: AsyncSession, lock: bool = False) -> BracketEvents:
     """
-    An event run by one of the signed in account's profiles, or a 404.
+    An event run by one of the signed in account's profiles, or one they're an admin of; else a 404.
+    """
+
+    event = await _event_by_public_id(public_id, db, lock)
+    if event.host_profile_id not in await _my_profile_ids(user_id, db) and event.id not in await _admin_event_ids(user_id, db):
+        raise HTTPException(status_code=404, detail="Event not found.")
+    return event
+
+async def _owner_event(user_id: str, public_id: str, db: AsyncSession, lock: bool = False) -> BracketEvents:
+    """
+    An event run by one of the signed in account's own profiles (not as an admin), else a 404.
     """
 
     event = await _event_by_public_id(public_id, db, lock)
@@ -142,8 +164,17 @@ async def _entry_accounts(entries: list[BracketEntries], db: AsyncSession) -> di
         out[e.id].discard(None)
     return out
 
-async def _host_account(event: BracketEvents, db: AsyncSession):
-    return (await db.execute(select(Profiles.account_id).where(Profiles.id == event.host_profile_id))).scalar()
+async def _manager_accounts(event: BracketEvents, db: AsyncSession) -> list:
+    """
+    The host's account and every accepted admin's: who hears about disputes and no-shows.
+    """
+
+    host = (await db.execute(select(Profiles.account_id).where(Profiles.id == event.host_profile_id))).scalar()
+    admins = (await db.execute(
+        select(Profiles.account_id).join(BracketEventAdmins, BracketEventAdmins.profile_id == Profiles.id)
+        .where(BracketEventAdmins.event_id == event.id).where(BracketEventAdmins.status == "accepted")
+    )).scalars().all()
+    return [host, *admins]
 
 # ---- life cycle ------------------------------------------------------------
 
@@ -225,11 +256,20 @@ async def _events_out(events: list[BracketEvents], user_id: str | None, db: Asyn
     team_public = dict((await db.execute(select(Teams.id, Teams.public_id).where(Teams.id.in_(team_ids)))).all()) if team_ids else {}
     mine = await _my_profile_ids(user_id, db)
     team_roles = await _my_team_roles(user_id, db)
+    admin_rows = (await db.execute(
+        select(BracketEventAdmins, Profiles).join(Profiles, Profiles.id == BracketEventAdmins.profile_id)
+        .where(BracketEventAdmins.event_id.in_(event_ids)).order_by(BracketEventAdmins.created_at)
+    )).all()
+    admins_by_event: dict = {e.id: [] for e in events}
+    for admin, prof in admin_rows:
+        admins_by_event[admin.event_id].append((admin, prof))
 
     out = []
     for event in events:
         host = profiles[event.host_profile_id]
-        can_manage = event.host_profile_id in mine
+        is_host = event.host_profile_id in mine
+        is_admin = any(a.status == "accepted" and p.id in mine for a, p in admins_by_event[event.id])
+        can_manage = is_host or is_admin
         viewer_entry = None
         entrants = []
         for x in by_event[event.id]:
@@ -262,10 +302,15 @@ async def _events_out(events: list[BracketEvents], user_id: str | None, db: Asyn
             "name": event.name,
             "eventType": event.event_type,
             "game": event.game,
+            "gameTitle": event.game_title,
             "format": event.format,
             "teamSize": f"{event.team_size}v{event.team_size}",
             "bestOf": event.best_of,
+            "finalBestOf": event.final_best_of,
             "maxEntrants": event.max_entrants,
+            "minEntrants": event.min_entrants,
+            "platform": event.platform,
+            "restrictions": event.restrictions or [],
             "startsAt": _iso(event.starts_at),
             "locationType": event.location_type,
             "venue": event.venue,
@@ -284,6 +329,11 @@ async def _events_out(events: list[BracketEvents], user_id: str | None, db: Asyn
             "host": {"type": host.type, "username": host.username, "public_id": host.public_id, "profile_picture": host.profile_picture},
             "entrants": entrants,
             "canManage": can_manage,
+            "isHost": is_host,
+            "admins": [
+                {"id": str(a.id), "status": a.status, "username": p.username, "public_id": p.public_id, "profile_picture": p.profile_picture}
+                for a, p in admins_by_event[event.id]
+            ] if can_manage else [],
             "viewerEntrantId": str(viewer_entry[0].id) if viewer_entry else None,
             "viewerCanAct": bool(viewer_entry and viewer_entry[1]),
             "rostersLocked": is_live(event),
@@ -300,12 +350,16 @@ async def get_event(public_id: str, user_id: str | None, db: AsyncSession) -> di
 
 async def hosting_events(user_id: str, db: AsyncSession) -> list[dict]:
     """
-    Events any of the signed in account's profiles run, newest first.
+    Events any of the signed in account's profiles run or are an admin of, newest first.
     """
 
+    admin_of = await _admin_event_ids(user_id, db)
+    condition = BracketEvents.host_profile_id.in_(select(Profiles.id).where(Profiles.account_id == user_id))
+    if admin_of:
+        condition = condition | BracketEvents.id.in_(admin_of)
     events = (await db.execute(
         select(BracketEvents)
-        .where(BracketEvents.host_profile_id.in_(select(Profiles.id).where(Profiles.account_id == user_id)))
+        .where(condition)
         .order_by(BracketEvents.created_at.desc())
     )).scalars().all()
     return await _events_out(list(events), user_id, db)
@@ -358,8 +412,9 @@ async def create_event(user_id: str, body: EventCreate, db: AsyncSession) -> dic
     size_a, size_b = body.team_size.split("v")
     if size_a != size_b:
         raise HTTPException(status_code=422, detail="Both sides need the same team size.")
-    if body.event_type == "lan" and body.location_type != "in_person":
-        raise HTTPException(status_code=422, detail="LANs are in person.")
+    # LANs are in person; everything else is online.
+    location_type = "in_person" if body.event_type == "lan" else "online"
+    _check_limits(body.min_entrants, body.max_entrants, body.final_best_of)
 
     event = BracketEvents(
         id = uuid.uuid4(),
@@ -368,13 +423,18 @@ async def create_event(user_id: str, body: EventCreate, db: AsyncSession) -> dic
         name = body.name.strip(),
         event_type = body.event_type,
         game = body.game.strip(),
+        game_title = body.game_title.strip(),
         format = body.format,
         team_size = int(size_a),
         best_of = body.best_of,
+        final_best_of = body.final_best_of if body.format in engine.FINAL_FORMATS else None,
         max_entrants = body.max_entrants,
+        min_entrants = body.min_entrants,
+        platform = body.platform,
+        restrictions = body.restrictions,
         starts_at = body.starts_at,
-        location_type = body.location_type,
-        venue = body.venue.strip() if body.location_type == "in_person" else "",
+        location_type = location_type,
+        venue = body.venue.strip() if location_type == "in_person" else "",
         entry_fee = body.entry_fee,
         prize = body.prize.strip(),
         description = body.description,
@@ -387,16 +447,29 @@ async def create_event(user_id: str, body: EventCreate, db: AsyncSession) -> dic
         bracket = None,
     )
     db.add(event)
+    await db.flush()
+    for profile_public_id in dict.fromkeys(body.admins):
+        await _invite_admin(event, host, profile_public_id, db)
     await db.commit()
     return await _event_out(event, user_id, db)
+
+def _check_limits(min_entrants, max_entrants, final_best_of) -> None:
+    if min_entrants is not None and max_entrants is not None and min_entrants > max_entrants:
+        raise HTTPException(status_code=422, detail="The minimum can't be more than the maximum.")
+    if final_best_of is not None and final_best_of % 2 == 0:
+        raise HTTPException(status_code=422, detail="Finals need an odd best of.")
 
 async def update_event(user_id: str, public_id: str, body: EventUpdate, db: AsyncSession) -> dict:
     event = await _host_event(user_id, public_id, db, lock = True)
     values = body.model_dump(exclude_unset = True)
     if _published(event):
         values.pop("max_entrants", None)
+        values.pop("min_entrants", None)
         if values.get("registration_open"):
             raise HTTPException(status_code=409, detail="The bracket is live, so sign-ups can't reopen.")
+    if "final_best_of" in values and event.format not in engine.FINAL_FORMATS:
+        values["final_best_of"] = None
+    _check_limits(values.get("min_entrants", event.min_entrants), values.get("max_entrants", event.max_entrants), values.get("final_best_of"))
     for key, value in values.items():
         setattr(event, key, value.strip() if isinstance(value, str) and key != "description" and key != "rules" else value)
 
@@ -407,7 +480,7 @@ async def update_event(user_id: str, public_id: str, body: EventUpdate, db: Asyn
     return await _event_out(event, user_id, db)
 
 async def delete_event(user_id: str, public_id: str, db: AsyncSession) -> None:
-    event = await _host_event(user_id, public_id, db)
+    event = await _owner_event(user_id, public_id, db)
     await db.delete(event)
     await db.commit()
 
@@ -764,7 +837,7 @@ async def player_report(user_id: str, public_id: str, match_id: str, body: Match
     if theirs:
         for side, other in ((me, opponent_id), (opponent_id, me)):
             notify(db, accounts.get(entries[side].id, ()), "score_disputed", {**data, "opponent": entries[other].name})
-        notify(db, [await _host_account(event, db)], "score_disputed", {**data, "opponent": f"{entries[me].name} vs {entries[opponent_id].name}", "host": True})
+        notify(db, await _manager_accounts(event, db), "score_disputed", {**data, "opponent": f"{entries[me].name} vs {entries[opponent_id].name}", "host": True})
     else:
         notify(db, accounts.get(entries[opponent_id].id, ()), "opponent_reported", {**data, "opponent": entries[me].name})
     await db.commit()
@@ -791,7 +864,7 @@ async def report_no_show(user_id: str, public_id: str, match_id: str, db: AsyncS
     accounts = await _entry_accounts(list(entries.values()), db)
     data = {"event_id": event.public_id, "event_name": event.name, "match_id": match_id}
     notify(db, accounts.get(entries[against].id, ()), "no_show_reported", {**data, "opponent": entries[me].name, "against_you": True})
-    notify(db, [await _host_account(event, db)], "no_show_reported", {**data, "opponent": entries[against].name, "against_you": False, "host": True})
+    notify(db, await _manager_accounts(event, db), "no_show_reported", {**data, "opponent": entries[against].name, "against_you": False, "host": True})
     await db.commit()
     return await _event_out(event, user_id, db)
 
@@ -840,3 +913,89 @@ async def revert_decision(user_id: str, public_id: str, entry_id: str, db: Async
         "log": [{**l, "reverted": True, "revertedAt": _iso(_now())} if l["id"] == entry_id else l for l in b.get("log", [])],
     }
     return await _commit_bracket(event, bracket, before, user_id, db)
+
+# ---- admins ----------------------------------------------------------------
+#
+# The host (only the host, not other admins) invites player profiles to help run an event. The
+# invite shows in the player's notification bell; once accepted, the event appears on their
+# Hosting tab and they can manage it like the host, except deleting it or changing admins.
+
+MAX_ADMINS = 10
+
+async def _invite_admin(event: BracketEvents, host: Profiles, profile_public_id: str, db: AsyncSession) -> None:
+    profile = (await db.execute(select(Profiles).where(Profiles.public_id == profile_public_id))).scalars().first()
+    if not profile or profile.type != "player":
+        raise HTTPException(status_code=404, detail="Player not found.")
+    if profile.account_id == host.account_id:
+        raise HTTPException(status_code=409, detail="You already run this event.")
+    existing = (await db.execute(
+        select(BracketEventAdmins).where(BracketEventAdmins.event_id == event.id).where(BracketEventAdmins.profile_id == profile.id)
+    )).scalars().first()
+    if existing:
+        state = "an admin" if existing.status == "accepted" else "invited"
+        raise HTTPException(status_code=409, detail=f"{profile.username} is already {state}.")
+    count = len((await db.execute(select(BracketEventAdmins.id).where(BracketEventAdmins.event_id == event.id))).all())
+    if count >= MAX_ADMINS:
+        raise HTTPException(status_code=409, detail=f"An event can have up to {MAX_ADMINS} admins.")
+    invite = BracketEventAdmins(id = uuid.uuid4(), event_id = event.id, profile_id = profile.id, status = "pending")
+    db.add(invite)
+    notify(db, [profile.account_id], "admin_invite", {
+        "event_id": event.public_id, "event_name": event.name, "invite_id": str(invite.id), "host": host.username,
+    })
+
+async def invite_admin(user_id: str, public_id: str, body: AdminInvite, db: AsyncSession) -> dict:
+    event = await _owner_event(user_id, public_id, db, lock = True)
+    host = (await db.execute(select(Profiles).where(Profiles.id == event.host_profile_id))).scalars().one()
+    await _invite_admin(event, host, body.profile, db)
+    await db.commit()
+    return await _event_out(event, user_id, db)
+
+async def remove_admin(user_id: str, public_id: str, admin_id: uuid.UUID, db: AsyncSession) -> dict:
+    """
+    The host removes an admin (or cancels an invite), or an admin steps down.
+    """
+
+    event = await _event_by_public_id(public_id, db, lock = True)
+    admin = (await db.execute(
+        select(BracketEventAdmins).where(BracketEventAdmins.id == admin_id).where(BracketEventAdmins.event_id == event.id)
+    )).scalars().first()
+    mine = await _my_profile_ids(user_id, db)
+    if not admin or (event.host_profile_id not in mine and admin.profile_id not in mine):
+        raise HTTPException(status_code=404, detail="Admin not found.")
+    await db.delete(admin)
+    await db.commit()
+    return await _event_out(event, user_id, db)
+
+async def my_admin_invites(user_id: str, db: AsyncSession) -> list[dict]:
+    rows = (await db.execute(
+        select(BracketEventAdmins, BracketEvents, Profiles)
+        .join(BracketEvents, BracketEvents.id == BracketEventAdmins.event_id)
+        .join(Profiles, Profiles.id == BracketEvents.host_profile_id)
+        .where(BracketEventAdmins.profile_id.in_(select(Profiles.id).where(Profiles.account_id == user_id)))
+        .where(BracketEventAdmins.status == "pending")
+        .order_by(BracketEventAdmins.created_at.desc())
+    )).all()
+    return [
+        {"id": str(a.id), "eventId": e.public_id, "eventName": e.name, "game": e.game, "startsAt": _iso(e.starts_at),
+         "host": {"username": h.username, "public_id": h.public_id, "type": h.type}}
+        for a, e, h in rows
+    ]
+
+async def respond_admin_invite(user_id: str, invite_id: uuid.UUID, accept: bool, db: AsyncSession) -> list[dict]:
+    invite = (await db.execute(
+        select(BracketEventAdmins).where(BracketEventAdmins.id == invite_id)
+        .where(BracketEventAdmins.profile_id.in_(select(Profiles.id).where(Profiles.account_id == user_id)))
+        .where(BracketEventAdmins.status == "pending")
+    )).scalars().first()
+    if not invite:
+        raise HTTPException(status_code=404, detail="Invite not found.")
+    if accept:
+        invite.status = "accepted"
+        event = (await db.execute(select(BracketEvents).where(BracketEvents.id == invite.event_id))).scalars().one()
+        me = (await db.execute(select(Profiles).where(Profiles.id == invite.profile_id))).scalars().one()
+        host = (await db.execute(select(Profiles.account_id).where(Profiles.id == event.host_profile_id))).scalar()
+        notify(db, [host], "admin_joined", {"event_id": event.public_id, "event_name": event.name, "player": me.username})
+    else:
+        await db.delete(invite)
+    await db.commit()
+    return await my_admin_invites(user_id, db)

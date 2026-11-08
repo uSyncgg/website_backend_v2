@@ -24,10 +24,15 @@ class BracketEvents(Base):
     name: Mapped[str] = mapped_column()
     event_type: Mapped[str] = mapped_column()
     game: Mapped[str] = mapped_column()
+    game_title: Mapped[str] = mapped_column(default = "", server_default = text("''"))
     format: Mapped[str] = mapped_column()
     team_size: Mapped[int] = mapped_column()
     best_of: Mapped[int] = mapped_column()
+    final_best_of: Mapped[int | None] = mapped_column(nullable = True)
     max_entrants: Mapped[int | None] = mapped_column(nullable = True)
+    min_entrants: Mapped[int | None] = mapped_column(nullable = True)
+    platform: Mapped[str] = mapped_column(default = "pc_allowed", server_default = text("'pc_allowed'"))
+    restrictions: Mapped[list] = mapped_column(JSONB, default = list, server_default = text("'[]'::jsonb"))
     starts_at: Mapped[datetime] = mapped_column(DateTime(timezone = True))
     location_type: Mapped[str] = mapped_column(default = "online", server_default = text("'online'"))
     venue: Mapped[str] = mapped_column(default = "", server_default = text("''"))
@@ -46,7 +51,8 @@ class BracketEvents(Base):
     __table_args__ = (
         UniqueConstraint("public_id", name = "uq_bracket_events_public_id"),
         CheckConstraint("event_type IN ('league', 'lan', 'tournament')", name = "ck_bracket_events_type"),
-        CheckConstraint("format IN ('single_elim', 'double_elim', 'round_robin')", name = "ck_bracket_events_format"),
+        CheckConstraint("format IN ('single_elim', 'double_elim', 'round_robin', 'swiss')", name = "ck_bracket_events_format"),
+        CheckConstraint("platform IN ('pc_allowed', 'console_only')", name = "ck_bracket_events_platform"),
         CheckConstraint("team_size BETWEEN 1 AND 10", name = "ck_bracket_events_team_size"),
     )
 
@@ -80,6 +86,26 @@ class BracketEntries(Base):
         CheckConstraint("status IN ('signed_up', 'pending')", name = "ck_bracket_entries_status"),
         Index("uq_bracket_entries_team", "event_id", "team_id", unique = True, postgresql_where = text("team_id IS NOT NULL")),
         Index("uq_bracket_entries_solo", "event_id", "profile_id", unique = True, postgresql_where = text("team_id IS NULL")),
+    )
+
+class BracketEventAdmins(Base):
+    """
+    SQL Alchemy model describing the bracket_event_admins table: profiles the host invited to help
+    run an event. Once accepted, an admin can do everything the host can except delete the event
+    or change its admins.
+    """
+
+    __tablename__ = "bracket_event_admins"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
+    event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_events.id", ondelete = "CASCADE"), index = True)
+    profile_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("profiles.id", ondelete = "CASCADE"), index = True)
+    status: Mapped[str] = mapped_column(default = "pending", server_default = text("'pending'"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = text("now()"))
+
+    __table_args__ = (
+        UniqueConstraint("event_id", "profile_id", name = "uq_bracket_event_admins"),
+        CheckConstraint("status IN ('pending', 'accepted')", name = "ck_bracket_event_admins_status"),
     )
 
 class Notifications(Base):

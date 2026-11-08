@@ -25,7 +25,7 @@ from app.models.brackets import Notifications
 from app.services import brackets as svc
 from app.services import teams as team_svc
 from app.services.notifications import list_notifications
-from app.schemas.brackets import EventCreate, Registration, MatchScore, EventDelay
+from app.schemas.brackets import EventCreate, EventUpdate, Registration, MatchScore, EventDelay, AdminInvite
 
 RUN = uuid.uuid4().hex[:6]
 accounts = []
@@ -199,6 +199,56 @@ async def main():
         await expect_http("host can't host as a player-only account", svc.create_event(a_uids[1], EventCreate(
             host_profile = host.public_id, name = "x", event_type = "tournament", game = "Halo", format = "single_elim",
             team_size = "1v1", best_of = 1, starts_at = datetime.now(timezone.utc)), db), 403)
+
+        print("event options")
+        opts = await svc.create_event(host_uid, EventCreate(
+            host_profile = host.public_id, name = f"E2E options {RUN}", event_type = "league", game = "Call of Duty",
+            game_title = "Black Ops 7", format = "single_elim", team_size = "1v1", best_of = 3, final_best_of = 7,
+            max_entrants = 8, min_entrants = 4, platform = "console_only", restrictions = ["  No snipers ", "NA only"],
+            location_type = "in_person", venue = "Somewhere", starts_at = datetime.now(timezone.utc),
+            admins = [a_players[0].public_id]), db)
+        check("options saved", opts["gameTitle"] == "Black Ops 7" and opts["finalBestOf"] == 7 and opts["minEntrants"] == 4
+              and opts["platform"] == "console_only" and opts["restrictions"] == ["No snipers", "NA only"])
+        check("non-LAN events are always online", opts["locationType"] == "online" and opts["venue"] == "")
+        check("admin invited at creation", [(x["username"], x["status"]) for x in opts["admins"]] == [(a_players[0].username, "pending")])
+        lan = await svc.create_event(host_uid, EventCreate(
+            host_profile = host.public_id, name = f"E2E LAN {RUN}", event_type = "lan", game = "Halo", format = "swiss",
+            team_size = "1v1", best_of = 3, final_best_of = 5, venue = "Arena", starts_at = datetime.now(timezone.utc)), db)
+        check("LANs are in person; swiss has no finals best of", lan["locationType"] == "in_person" and lan["venue"] == "Arena"
+              and lan["format"] == "swiss" and lan["finalBestOf"] is None)
+        await expect_http("min above max refused", svc.create_event(host_uid, EventCreate(
+            host_profile = host.public_id, name = "x", event_type = "league", game = "Halo", format = "single_elim",
+            team_size = "1v1", best_of = 3, max_entrants = 4, min_entrants = 8, starts_at = datetime.now(timezone.utc)), db), 422)
+        await expect_http("even finals best of refused", svc.create_event(host_uid, EventCreate(
+            host_profile = host.public_id, name = "x", event_type = "league", game = "Halo", format = "single_elim",
+            team_size = "1v1", best_of = 3, final_best_of = 4, starts_at = datetime.now(timezone.utc)), db), 422)
+
+        print("admins")
+        oid = opts["id"]
+        await expect_http("pending admin can't manage yet", svc.update_event(a_uids[0], oid, EventUpdate(name = "nope"), db), 404)
+        invites = await svc.my_admin_invites(a_uids[0], db)
+        check("invitee sees the invite", len(invites) == 1 and invites[0]["eventId"] == oid)
+        check("invite notification sent", len(await notes(db, a_uids[0], "admin_invite")) == 1)
+        await svc.respond_admin_invite(a_uids[0], uuid.UUID(invites[0]["id"]), True, db)
+        check("host told the admin joined", len(await notes(db, host_uid, "admin_joined")) == 1)
+        as_admin = await svc.get_event(oid, a_uids[0], db)
+        check("admin can manage but isn't the host", as_admin["canManage"] and not as_admin["isHost"])
+        check("event on the admin's Hosting list", oid in [e["id"] for e in await svc.hosting_events(a_uids[0], db)])
+        renamed = await svc.update_event(a_uids[0], oid, EventUpdate(name = f"E2E renamed {RUN}"), db)
+        check("admin can edit the event", renamed["name"] == f"E2E renamed {RUN}")
+        await expect_http("admin can't delete the event", svc.delete_event(a_uids[0], oid, db), 404)
+        await expect_http("admin can't add admins", svc.invite_admin(a_uids[0], oid, AdminInvite(profile = b_players[0].public_id), db), 404)
+        public = await svc.get_event(oid, b_uids[0], db)
+        check("outsiders don't see the admin list", public["admins"] == [] and not public["canManage"])
+        ev2 = await svc.invite_admin(host_uid, oid, AdminInvite(profile = b_players[0].public_id), db)
+        await expect_http("can't invite twice", svc.invite_admin(host_uid, oid, AdminInvite(profile = b_players[0].public_id), db), 409)
+        await expect_http("only player profiles can be admins", svc.invite_admin(host_uid, oid, AdminInvite(profile = host.public_id), db), 404)
+        b_invite = next(x for x in ev2["admins"] if x["username"] == b_players[0].username)
+        await svc.respond_admin_invite(b_uids[0], uuid.UUID(b_invite["id"]), False, db)
+        check("declined invite is gone", [x["username"] for x in (await svc.get_event(oid, host_uid, db))["admins"]] == [a_players[0].username])
+        a_admin = (await svc.get_event(oid, host_uid, db))["admins"][0]
+        await svc.remove_admin(a_uids[0], oid, uuid.UUID(a_admin["id"]), db)
+        await expect_http("admin who stepped down loses access", svc.update_event(a_uids[0], oid, EventUpdate(name = "x"), db), 404)
 
 async def cleanup():
     async with AsyncSessionLocal() as db:

@@ -1,7 +1,8 @@
 import uuid
 
 from datetime import datetime
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from typing import Annotated
+from pydantic import StringConstraints, BaseModel, ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
 
 # Request bodies for /brackets. The frontend speaks camelCase (it's the same shape the bracket
@@ -20,15 +21,23 @@ class SignupForm(CamelModel):
     player_fields: list[str] = Field(default_factory = list, max_length = 10)
     questions: list[SignupQuestion] = Field(default_factory = list, max_length = 20)
 
+Restriction = Annotated[str, StringConstraints(strip_whitespace = True, min_length = 1, max_length = 200)]
+
 class EventCreate(CamelModel):
     host_profile: str
     name: str = Field(min_length = 1, max_length = 80)
     event_type: str = Field(pattern = "^(league|lan|tournament)$")
     game: str = Field(min_length = 1, max_length = 60)
-    format: str = Field(pattern = "^(single_elim|double_elim|round_robin)$")
+    game_title: str = Field(default = "", max_length = 80)
+    format: str = Field(pattern = "^(single_elim|double_elim|round_robin|swiss)$")
     team_size: str = Field(pattern = "^([1-9]|10)v([1-9]|10)$")
     best_of: int = Field(ge = 1, le = 9)
+    final_best_of: int | None = Field(default = None, ge = 1, le = 9)
     max_entrants: int | None = Field(default = None, ge = 2, le = 1024)
+    min_entrants: int | None = Field(default = None, ge = 2, le = 1024)
+    platform: str = Field(default = "pc_allowed", pattern = "^(pc_allowed|console_only)$")
+    restrictions: list[Restriction] = Field(default_factory = list, max_length = 10)
+    admins: list[str] = Field(default_factory = list, max_length = 10)
     starts_at: datetime
     location_type: str = Field(default = "online", pattern = "^(online|in_person)$")
     venue: str = Field(default = "", max_length = 200)
@@ -48,7 +57,11 @@ class EventUpdate(CamelModel):
     prize: str | None = Field(default = None, max_length = 200)
     venue: str | None = Field(default = None, max_length = 200)
     best_of: int | None = Field(default = None, ge = 1, le = 9)
+    final_best_of: int | None = Field(default = None, ge = 1, le = 9)
     max_entrants: int | None = Field(default = None, ge = 2, le = 1024)
+    min_entrants: int | None = Field(default = None, ge = 2, le = 1024)
+    platform: str | None = Field(default = None, pattern = "^(pc_allowed|console_only)$")
+    restrictions: list[Restriction] | None = Field(default = None, max_length = 10)
     registration_open: bool | None = None
     no_show_minutes: int | None = Field(default = None, ge = 0, le = 240)
 
@@ -80,3 +93,9 @@ class MatchScore(CamelModel):
 
 class NotificationsRead(BaseModel):
     ids: list[uuid.UUID] | None = None
+
+class AdminInvite(CamelModel):
+    profile: str = Field(min_length = 1, max_length = 64)
+
+class AdminResponse(CamelModel):
+    accept: bool

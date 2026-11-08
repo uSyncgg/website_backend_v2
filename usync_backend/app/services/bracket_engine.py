@@ -9,7 +9,12 @@ A match is a dict: { id, round, slot, a, b, status, winner, loser, scoreA?, scor
 status is 'empty' (bye vs bye) | 'bye' | 'pending' (waiting on an earlier match) | 'ready' | 'complete'.
 """
 
+import math
+
 BYE = "__bye__"
+
+# Formats with a single deciding final, the only ones a different finals best of applies to.
+FINAL_FORMATS = ("single_elim", "double_elim")
 
 
 def is_entrant(entrant_id) -> bool:
@@ -144,7 +149,114 @@ def build_round_robin(seeds: list, results: dict) -> dict:
     return {"rounds": rounds}
 
 
+def standings_of(seeds: list, matches: list[dict]) -> list[dict]:
+    table = {sid: {"id": sid, "seed": i, "played": 0, "wins": 0, "losses": 0, "diff": 0} for i, sid in enumerate(seeds)}
+    for m in matches:
+        if m["status"] == "bye" and m["winner"] in table:
+            table[m["winner"]]["wins"] += 1
+            continue
+        if m["status"] != "complete":
+            continue
+        margin = abs(m["scoreA"] - m["scoreB"])
+        table[m["winner"]]["wins"] += 1
+        table[m["winner"]]["diff"] += margin
+        table[m["loser"]]["losses"] += 1
+        table[m["loser"]]["diff"] -= margin
+        table[m["a"]]["played"] += 1
+        table[m["b"]]["played"] += 1
+    return sorted(table.values(), key = lambda r: (-r["wins"], -r["diff"], r["seed"]))
+
+
+PAIRING_BUDGET = 20000
+
+
+def _pair_up(pool: list, played) -> list[tuple]:
+    """
+    Pairs a ranked list down the table with no rematches when that's possible (a bounded
+    backtracking search, the same as bracket.js); otherwise pairs neighbours in order.
+    """
+
+    steps = 0
+
+    def search(rest):
+        nonlocal steps
+        if not rest:
+            return []
+        steps += 1
+        if steps > PAIRING_BUDGET:
+            return None
+        a, others = rest[0], rest[1:]
+        for j, b in enumerate(others):
+            if played(a, b):
+                continue
+            tail = search(others[:j] + others[j + 1:])
+            if tail is not None:
+                return [(a, b), *tail]
+        return None
+
+    found = search(pool)
+    if found is not None:
+        return found
+    return [(pool[i], pool[i + 1]) for i in range(0, len(pool), 2)]
+
+
+def swiss_round_count(n: int) -> int:
+    return max(1, math.ceil(math.log2(n)))
+
+
+def build_swiss(seeds: list, results: dict) -> dict:
+    if len(seeds) < 2:
+        return {"rounds": []}
+    total = swiss_round_count(len(seeds))
+    per_round = len(seeds) // 2
+    rounds: list[list[dict]] = []
+    byes: set = set()
+    met: set = set()
+
+    def key(a, b):
+        return "|".join(sorted([a, b]))
+
+    for rnd in range(total):
+        prev = rounds[rnd - 1] if rnd else None
+        if prev and any(m["status"] not in ("complete", "bye") for m in prev):
+            rounds.append([{"id": f"sw{rnd}m{i}", "round": rnd, "slot": i, "a": None, "b": None, "status": "pending", "winner": None, "loser": None}
+                           for i in range(per_round)])
+            continue
+        pool = list(seeds) if rnd == 0 else [r["id"] for r in standings_of(seeds, [m for r in rounds for m in r])]
+        bye = None
+        if len(pool) % 2:
+            i = len(pool) - 1
+            while i > 0 and pool[i] in byes:
+                i -= 1
+            bye = pool.pop(i)
+            byes.add(bye)
+        pairs = []
+        if rnd == 0:
+            half = len(pool) // 2
+            pairs = [(pool[i], pool[i + half]) for i in range(half)]
+        else:
+            pairs = _pair_up(pool, lambda a, b: key(a, b) in met)
+        matches = []
+        for i, (a, b) in enumerate(pairs):
+            met.add(key(a, b))
+            matches.append(_decide({"id": f"sw{rnd}m{i}", "round": rnd, "slot": i, "a": a, "b": b}, results))
+        if bye:
+            matches.append(_decide({"id": f"sw{rnd}bye", "round": rnd, "slot": len(pairs), "a": bye, "b": BYE}, results))
+        rounds.append(matches)
+    return {"rounds": rounds}
+
+
+def is_final_match(fmt: str, built: dict, match: dict) -> bool:
+    if fmt == "double_elim":
+        return match.get("bracket") == "grand"
+    if fmt == "single_elim":
+        return match["round"] == len(built["rounds"]) - 1
+    return False
+
+
 def build_bracket(fmt: str, seeds: list, results: dict) -> dict:
+    if fmt == "swiss":
+        return build_swiss(seeds, results)
     if fmt == "round_robin":
         return build_round_robin(seeds, results)
     if fmt == "double_elim":
