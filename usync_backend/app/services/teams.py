@@ -25,6 +25,10 @@ from app.schemas.users import (
 # manages it (invites, captains, entering events and paying for entries); players join by
 # accepting an invite to their player profile. Only player profiles can be on a team.
 #
+# Roster changes are checked against bracket events (app.services.brackets, imported inside the
+# functions to avoid a cycle): rosters are locked while a team is in a live bracket, and a change
+# moves the team's sign-ups between pending and signed up.
+#
 # This module mustn't import app.services.users at the top: that module builds an org's teams at
 # sign up from here. The picture helpers are imported inside the functions that use them.
 
@@ -346,6 +350,12 @@ async def update_team(user_id: str, team_public_id: str, body: TeamUpdate, db: A
 
         await db.refresh(team)
 
+        if "name" in values:
+            # Its sign-ups for upcoming events show the new name.
+            from app.services.brackets import sync_team
+            await sync_team(team.id, db)
+            await db.commit()
+
     return await _team_view(user_id, team, db)
 
 async def update_team_picture(
@@ -381,11 +391,17 @@ async def update_team_picture(
 async def delete_team(user_id: str, team_public_id: str, db: AsyncSession, supabase: AsyncClient) -> None:
     from app.services.users import _remove_pfps, _storage_path
 
+    from app.services.brackets import before_team_deleted, refresh_events
+
     team = await _owned_team(user_id, team_public_id, db)
     old = _storage_path(team.picture) if team.picture else None
 
+    # Not while it's in a live bracket; its sign-ups for upcoming events go with it.
+    upcoming = await before_team_deleted(team.id, db)
+
     # Members and invites cascade with the team.
     await db.execute(delete(Teams).where(Teams.id == team.id))
+    await refresh_events(upcoming, db)
     await db.commit()
 
     await _remove_pfps([old] if old else [], supabase)
@@ -452,12 +468,16 @@ async def set_member_role(user_id: str, team_public_id: str, player_public_id: s
     return await _team_view(user_id, team, db)
 
 async def remove_member(user_id: str, team_public_id: str, player_public_id: str, db: AsyncSession) -> TeamOut:
+    from app.services.brackets import assert_roster_unlocked, sync_team
+
     team = await _owned_team(user_id, team_public_id, db)
     player = await _player_by_public_id(player_public_id, db)
+    await assert_roster_unlocked(team.id, db)
 
     await db.execute(
         delete(TeamMembers).where(TeamMembers.team_id == team.id).where(TeamMembers.profile_id == player.id)
     )
+    await sync_team(team.id, db)
     await db.commit()
 
     return await _team_view(user_id, team, db)
@@ -476,7 +496,11 @@ async def leave_team(user_id: str, team_public_id: str, db: AsyncSession) -> Non
     if team.owner_profile_id == player.id:
         raise HTTPException(status_code=409, detail="You own this team. Delete it instead.")
 
+    from app.services.brackets import assert_roster_unlocked, sync_team
+    await assert_roster_unlocked(team.id, db)
+
     await db.execute(delete(TeamMembers).where(TeamMembers.team_id == team.id).where(TeamMembers.profile_id == player.id))
+    await sync_team(team.id, db)
     await db.commit()
 
 # ---- the invited player's side ---------------------------------------------
@@ -530,6 +554,12 @@ async def respond_to_invite(user_id: str, invite_id: uuid.UUID, accept: bool, db
     if not invite:
         raise HTTPException(status_code=404, detail="Invite not found.")
 
+    if accept:
+        from app.services.brackets import assert_roster_unlocked, sync_team
+        from app.services.notifications import notify
+
+        await assert_roster_unlocked(invite.team_id, db)
+
     invite.status = "accepted" if accept else "declined"
 
     if accept:
@@ -539,6 +569,21 @@ async def respond_to_invite(user_id: str, invite_id: uuid.UUID, accept: bool, db
 
         if not already:
             db.add(TeamMembers(team_id = invite.team_id, profile_id = player.id))
+            await db.flush()
+
+            # Tell the owner and the captains, then update the team's event sign-ups.
+            team = await db.get(Teams, invite.team_id)
+            owner_account = (await db.execute(select(Profiles.account_id).where(Profiles.id == team.owner_profile_id))).scalar()
+            captain_accounts = (await db.execute(
+                select(Profiles.account_id)
+                .join(TeamMembers, TeamMembers.profile_id == Profiles.id)
+                .where(TeamMembers.team_id == team.id)
+                .where(TeamMembers.role == "captain")
+            )).scalars().all()
+            notify(db, {owner_account, *captain_accounts} - {player.account_id}, "team_joined", {
+                "team_id": team.public_id, "team_name": team.name, "who": player.username,
+            })
+            await sync_team(team.id, db)
 
     await db.commit()
 

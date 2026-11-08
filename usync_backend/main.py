@@ -26,6 +26,7 @@ from app.routers import webhooks
 from app.routers import users
 from app.routers import event_claims
 from app.routers import teams
+from app.routers import brackets
 
 from app.services import GAMES, STRIPE_SECRET_KEY, EVENT_TYPES
 from app.services.sitemap import get_sitemap_xml
@@ -101,3 +102,5 @@ app.include_router(webhooks.router)
 app.include_router(users.router)
 app.include_router(event_claims.router)
 app.include_router(teams.router)
+app.include_router(brackets.router)
+app.include_router(brackets.notifications_router)
