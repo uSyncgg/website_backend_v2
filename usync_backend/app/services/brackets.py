@@ -12,6 +12,7 @@ from app.models.teams import Teams, TeamMembers
 from app.models.brackets import BracketEvents, BracketEntries, BracketEventAdmins
 from app.services import bracket_engine as engine
 from app.services.notifications import notify
+from app.services import wallet
 from app.schemas.brackets import EventCreate, EventUpdate, EventDelay, Registration, MatchScore, AdminInvite
 
 # Bracket hosting: events a host or venue profile runs, their sign-ups and their brackets.
@@ -552,6 +553,12 @@ async def register(user_id: str, public_id: str, body: Registration, db: AsyncSe
             email = body.email, answers = body.answers, pass_name = body.pass_name, roster = roster,
         )
 
+    # Paid events take the pass price + 5% uSync fee from the signed in account's balance, in the
+    # same transaction as the entry (a duplicate sign-up rolls the charge back too).
+    cost = wallet.entry_cost(event, body.pass_name)
+    if cost:
+        await wallet.charge_entry(user_id, event, entry.id, cost, db)
+
     db.add(entry)
     try:
         await db.commit()
@@ -561,6 +568,7 @@ async def register(user_id: str, public_id: str, body: Registration, db: AsyncSe
     return await _event_out(event, user_id, db)
 
 async def _remove_entry(event: BracketEvents, entry: BracketEntries, db: AsyncSession) -> None:
+    await wallet.refund_entries([entry.id], db)
     await db.delete(entry)
     await db.flush()
     entries = await _entries(event.id, db)
@@ -647,6 +655,10 @@ async def before_team_deleted(team_id, db: AsyncSession) -> list:
     )).scalars().all()
     upcoming = [e.id for e in events if not _published(e)]
     if upcoming:
+        entry_ids = (await db.execute(
+            select(BracketEntries.id).where(BracketEntries.team_id == team_id).where(BracketEntries.event_id.in_(upcoming))
+        )).scalars().all()
+        await wallet.refund_entries(entry_ids, db)
         await db.execute(delete(BracketEntries).where(BracketEntries.team_id == team_id).where(BracketEntries.event_id.in_(upcoming)))
     return upcoming
 
