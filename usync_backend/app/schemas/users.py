@@ -1,12 +1,12 @@
 import re
 
-from datetime import date
+from datetime import date, datetime
 from pydantic import BaseModel, model_validator, ConfigDict, StringConstraints, Field, BeforeValidator, AfterValidator, PlainSerializer
 from typing import Any, Literal, ClassVar, Annotated
 
 NONEMPTYSTR = Annotated[str, StringConstraints(min_length=1)]
 
-ProfileType = Literal["player", "host", "venue"]
+ProfileType = Literal["player", "host", "venue", "org"]
 # Socials plus competitive site accounts (CMG, Gankster, FACEIT, Battlefy).
 LinkPlatform = Literal["twitch", "twitter", "youtube", "kick", "discord", "instagram", "cmg", "gankster", "faceit", "battlefy"]
 PictureSource = Literal["upload", "copy_default"]
@@ -14,8 +14,8 @@ PictureSource = Literal["upload", "copy_default"]
 # other_roles is a set (no duplicates) that leaves as a sorted list, so the
 # ARRAY column and API responses get a stable order. Requests only accept the
 # fixed choices; responses take whatever is stored so an old value can't 500.
-# Venue isn't a choice: it's a profile type of its own.
-OtherRole = Literal["Coach", "Sponsor", "Team", "Viewer", "Other"]
+# Venue and Organization (formerly "Team") aren't choices: each is a profile type of its own.
+OtherRole = Literal["Coach", "Sponsor", "Viewer", "Other"]
 _SORTED = PlainSerializer(sorted, return_type=list[str])
 OtherRolesIn = Annotated[set[OtherRole], _SORTED]
 OtherRolesOut = Annotated[set[str], _SORTED]
@@ -114,6 +114,38 @@ class HostDetails(StrictIn):
     host_country: NONEMPTYSTR
     event_types: list[str] | None = None
 
+TEAM_NAME = Annotated[str, StringConstraints(min_length=2, max_length=40)]
+MAX_TEAMS_AT_SIGN_UP = 20
+
+class TeamIn(StrictIn):
+    """
+    A team to create under an org profile. Its name is unique within the org (ignoring case).
+    """
+
+    name: TEAM_NAME
+    game: str | None = None
+
+class OrgDetails(StrictIn):
+    """
+    The details of an org profile, sent at sign up or when adding the profile. Its name is the
+    profile's username, so `organization` isn't sent. `teams` is optional: an org can create
+    its teams now or later from its profile.
+    """
+
+    org_country: NONEMPTYSTR
+    games: list[str] | None = None
+    other_games: str | None = None
+    teams: list[TeamIn] = Field(default_factory=list, max_length=MAX_TEAMS_AT_SIGN_UP)
+
+    @model_validator(mode = "after")
+    def unique_team_names(self):
+        names = [t.name.casefold() for t in self.teams]
+
+        if len(names) != len(set(names)):
+            raise ValueError("Each team in an organization needs a different name.")
+
+        return self
+
 class VenueDetails(StrictIn):
     """
     The details of a venue profile: its locations, at least one.
@@ -148,8 +180,12 @@ class VenueProfileIn(ProfileBase):
     type: Literal["venue"]
     details: VenueDetails
 
+class OrgProfileIn(ProfileBase):
+    type: Literal["org"]
+    details: OrgDetails
+
 # `type` picks the model, so a player profile must send player details and so on.
-ProfileIn = Annotated[PlayerProfileIn | HostProfileIn | VenueProfileIn, Field(discriminator="type")]
+ProfileIn = Annotated[PlayerProfileIn | HostProfileIn | VenueProfileIn | OrgProfileIn, Field(discriminator="type")]
 
 class RegistrationOut(BaseModel):
     """
@@ -165,7 +201,7 @@ class RegistrationIn(StrictIn):
     """
 
     default_profile: ProfileType
-    profiles: list[ProfileIn] = Field(min_length=1, max_length=3)
+    profiles: list[ProfileIn] = Field(min_length=1, max_length=4)
 
     @model_validator(mode = "after")
     def check_profiles(self):
@@ -227,6 +263,45 @@ class HostPublic(BaseModel):
 class VenuePublic(BaseModel):
     locations: list[VenueOut] = []
 
+class TeamMemberOut(BaseModel):
+    """
+    A player on a team: their player profile's summary and role ("captain" or "player").
+    """
+
+    public_id: str
+    username: str
+    profile_picture: str | None = None
+    role: str
+
+class TeamInviteOut(BaseModel):
+    id: str
+    public_id: str
+    username: str
+    profile_picture: str | None = None
+    created_at: datetime
+
+class TeamOut(BaseModel):
+    """
+    A team. `owner` is the profile that runs it (an org, or the player who made it).
+    `invites` (pending only) is only filled in for the owner. `my_role` is the signed in
+    user's place on it ("owner", "captain", "player" or None), where that's known.
+    """
+
+    public_id: str
+    name: str
+    game: str | None = None
+    picture: str | None = None
+    created_at: datetime
+    owner: "ProfileSummary"
+    my_role: str | None = None
+    members: list[TeamMemberOut] = []
+    invites: list[TeamInviteOut] = []
+
+class OrgPublic(BaseModel):
+    organization: str
+    games: list[str] = []
+    teams: list[TeamOut] = []
+
 class Profile(BaseModel):
     """
     A public profile page. `others` lists the account's other profiles (from the profiles table
@@ -242,7 +317,7 @@ class Profile(BaseModel):
     other_roles: OtherRolesOut = set()
     other_role_detail: str | None = None
     links: dict[str, str] = {}
-    details: PlayerPublic | HostPublic | VenuePublic
+    details: PlayerPublic | HostPublic | VenuePublic | OrgPublic
     others: list[ProfileSummary] = []
 
 class PlayerSettings(BaseModel):
@@ -269,6 +344,12 @@ class HostSettings(BaseModel):
 class VenueSettings(BaseModel):
     locations: list[VenueOut] = []
 
+class OrgSettings(BaseModel):
+    organization: str
+    org_country: str
+    games: list[str] = []
+    other_games: str | None = None
+
 class ProfileSettingsOut(BaseModel):
     """
     Everything the owner can edit on one of their profiles.
@@ -285,7 +366,7 @@ class ProfileSettingsOut(BaseModel):
     other_roles: OtherRolesOut = set()
     other_role_detail: str | None = None
     links: dict[str, str] = {}
-    details: PlayerSettings | HostSettings | VenueSettings
+    details: PlayerSettings | HostSettings | VenueSettings | OrgSettings
 
 class Updater(StrictIn):
     """
@@ -363,10 +444,24 @@ class VenueUpdate(Updater):
 
     locations: list[VenueIn] | None = Field(default=None, min_length=1)
 
+class OrgUpdate(Updater):
+    """
+
+    """
+
+    never_null: ClassVar[set[str]] = {
+        "org_country"
+    }
+
+    # The name changes with the username (PATCH .../org/username), not here.
+    org_country: NONEMPTYSTR | None = None
+    games: list[str] | None = None
+    other_games: str | None = None
+
 class ProfileUpdate(Updater):
     """
     Partial update of one of the user's profiles. `links`, when sent, replaces the whole set.
-    `details` is checked against the profile's type (PlayerUpdate, HostUpdate or VenueUpdate).
+    `details` is checked against the profile's type (PlayerUpdate, HostUpdate, VenueUpdate or OrgUpdate).
     """
 
     never_null: ClassVar[set[str]] = {
@@ -396,6 +491,46 @@ class DefaultProfileUpdate(StrictIn):
 
     type: ProfileType
 
+class TeamCreate(TeamIn):
+    """
+    POST /teams (the `data` field; the picture is a file alongside). `owner_type` picks which of
+    the account's profiles owns it. `invites` are player usernames to invite straight away.
+    """
+
+    owner_type: ProfileType
+    invites: list[NONEMPTYSTR] = Field(default_factory=list, max_length=20)
+
+class TeamUpdate(Updater):
+    """
+    PATCH /teams/{team_public_id}. A null game clears it.
+    """
+
+    never_null: ClassVar[set[str]] = {"name"}
+
+    name: TEAM_NAME | None = None
+    game: str | None = None
+
+class TeamInviteCreate(StrictIn):
+    """
+    POST /teams/{team_public_id}/invites: the player profile's username.
+    """
+
+    username: NONEMPTYSTR
+
+class TeamRoleUpdate(StrictIn):
+    role: Literal["captain", "player"]
+
+class MyTeamInviteOut(BaseModel):
+    """
+    A pending invite as the invited player sees it: the team they'd join (with its roster) and
+    who invited them (the team's owner).
+    """
+
+    id: str
+    team: TeamOut
+    invited_by: "ProfileSummary"
+    created_at: datetime
+
 class UpdateProfileIn(BaseModel):
     """
     Validation class for payload information for the /profile/update endpoint.
@@ -409,3 +544,6 @@ class UpdateProfileOut(BaseModel):
     """
 
     message: str
+
+TeamOut.model_rebuild()
+MyTeamInviteOut.model_rebuild()
