@@ -29,7 +29,8 @@ class WalletTransactions(Base):
 
     type is 'deposit', 'withdrawal', 'entry_fee', 'entry_refund', 'prize' (winnings credited
     after an event closes) or 'host_payout' (a host's entry revenue minus prizes, less uSync's 2.5%,
-    kept in fee_cents). related_id points a refund at the charge it reverses. amount_cents is the signed
+    kept in fee_cents). related_id points a refund at the charge it reverses. account_id is set null
+    when the account is deleted, so the ledger stays for tax and accounting records without the person. amount_cents is the signed
     change to the balance (a deposit credits the amount asked for; the 5% deposit fee is charged
     on top and kept in fee_cents; an entry fee debits the pass price plus fee). A withdrawal is
     'pending' until its payout date (available_on, net 30) and 'cancelled' if it's pulled back
@@ -40,7 +41,7 @@ class WalletTransactions(Base):
     __tablename__ = "wallet_transactions"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
-    account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete = "CASCADE"))
+    account_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete = "SET NULL"), nullable = True)
     type: Mapped[str] = mapped_column()
     status: Mapped[str] = mapped_column(default = "completed", server_default = text("'completed'"))
     amount_cents: Mapped[int] = mapped_column()
@@ -79,7 +80,7 @@ class BracketEntryPayments(Base):
     entry_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("bracket_entries.id", ondelete = "SET NULL"), nullable = True, index = True)
     member_profile_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("profiles.id", ondelete = "CASCADE"))
     member_username: Mapped[str] = mapped_column()
-    payer_account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete = "CASCADE"), index = True)
+    payer_account_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete = "SET NULL"), nullable = True, index = True)
     amount_cents: Mapped[int] = mapped_column()
     fee_cents: Mapped[int] = mapped_column(default = 0, server_default = text("0"))
     status: Mapped[str] = mapped_column(default = "paid", server_default = text("'paid'"))

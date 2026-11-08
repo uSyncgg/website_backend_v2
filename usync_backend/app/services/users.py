@@ -1041,6 +1041,10 @@ async def delete_account(user_id: str, db: AsyncSession, supabase: AsyncClient) 
     Every step is safe to retry: a missing users row just deletes nothing.
     """
 
+    # Never lose or strand money: a balance, pending withdrawal or unfinished paid event has to be settled first.
+    from app.services.wallet import assert_can_close
+    await assert_can_close(user_id, db)
+
     await db.execute(delete(UsersParent).where(UsersParent.id == user_id))
     await db.commit()
 

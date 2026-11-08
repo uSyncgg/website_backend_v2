@@ -11,8 +11,9 @@ from sqlalchemy import select, func, extract
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.db import AsyncSessionLocal
-from app.models.users import UsersParent, Profiles
-from app.models.wallet import Wallets, WalletTransactions, PlayerEventResults
+from app.models.users import UsersParent, Profiles, Players
+from app.models.brackets import BracketEvents
+from app.models.wallet import Wallets, WalletTransactions, PlayerEventResults, BracketEntryPayments
 from app.services.notifications import notify
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,60 @@ def _now() -> datetime:
 
 def _test_deposits_enabled() -> bool:
     return os.getenv("WALLET_TEST_DEPOSITS", "false").lower() == "true"
+
+MIN_AGE = 18
+
+async def is_minor(account_id, db: AsyncSession) -> bool:
+    """
+    Whether the account's player profile gives a date of birth that makes them under 18. Accounts
+    with no date of birth (hosts, venues, organizations) aren't treated as minors.
+    """
+
+    dob = (await db.execute(
+        select(Players.date_of_birth).join(Profiles, Profiles.id == Players.profile_id).where(Profiles.account_id == account_id)
+    )).scalars().first()
+    if not dob:
+        return False
+    today = _now().date()
+    age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+    return age < MIN_AGE
+
+async def assert_adult(account_id, db: AsyncSession) -> None:
+    if await is_minor(account_id, db):
+        raise HTTPException(status_code = 403, detail = "The uSync Bank is for users 18 and older.")
+
+async def assert_can_close(account_id, db: AsyncSession) -> None:
+    """
+    Raises 409 while the account still has money in motion, so closing it never strands or loses
+    anyone's funds: a balance, a pending withdrawal, entry fees in events that haven't finished, or
+    entry revenue in a hosted event that hasn't been paid out or cancelled.
+    """
+
+    if await balance_of(account_id, db) > 0:
+        raise HTTPException(status_code = 409, detail = "Withdraw your uSync balance before closing your account.")
+
+    pending = (await db.execute(
+        select(WalletTransactions.id).where(WalletTransactions.account_id == account_id)
+        .where(WalletTransactions.type == "withdrawal").where(WalletTransactions.status == "pending").limit(1)
+    )).first()
+    if pending:
+        raise HTTPException(status_code = 409, detail = "You have a withdrawal that hasn't been paid out yet. You can close your account once it has been.")
+
+    open_event = (BracketEvents.paid_out_at.is_(None)) & (BracketEvents.cancelled_at.is_(None))
+    entered = (await db.execute(
+        select(BracketEntryPayments.id).join(BracketEvents, BracketEvents.id == BracketEntryPayments.event_id)
+        .where(BracketEntryPayments.payer_account_id == account_id).where(BracketEntryPayments.status == "paid").where(open_event).limit(1)
+    )).first()
+    if entered:
+        raise HTTPException(status_code = 409, detail = "You've paid entry fees for an event that hasn't finished. Leave it or wait until it's paid out before closing your account.")
+
+    hosted = (await db.execute(
+        select(BracketEntryPayments.id).join(BracketEvents, BracketEvents.id == BracketEntryPayments.event_id)
+        .where(BracketEvents.host_profile_id.in_(select(Profiles.id).where(Profiles.account_id == account_id)))
+        .where(BracketEntryPayments.status.in_(("paid", "forfeited"))).where(open_event).limit(1)
+    )).first()
+    if hosted:
+        raise HTTPException(status_code = 409, detail = "You host an event with entry fees that haven't been paid out. Close it out or cancel it before closing your account.")
 
 # ---- primitives (callers commit) -------------------------------------------
 
@@ -170,6 +225,7 @@ async def list_transactions(user_id: str, db: AsyncSession) -> list[dict]:
 # ---- deposits and withdrawals ----------------------------------------------
 
 async def deposit(user_id: str, amount: Decimal, db: AsyncSession) -> dict:
+    await assert_adult(user_id, db)
     cents = _cents(amount)
     if cents < MIN_DEPOSIT_CENTS:
         raise HTTPException(status_code = 422, detail = f"The minimum deposit is {money(MIN_DEPOSIT_CENTS)}.")
@@ -188,6 +244,7 @@ async def deposit(user_id: str, amount: Decimal, db: AsyncSession) -> dict:
     return await get_wallet(user_id, db)
 
 async def request_withdrawal(user_id: str, amount: Decimal, db: AsyncSession) -> dict:
+    await assert_adult(user_id, db)
     cents = _cents(amount)
     if cents < MIN_WITHDRAWAL_CENTS:
         raise HTTPException(status_code = 422, detail = f"The minimum withdrawal is {money(MIN_WITHDRAWAL_CENTS)}.")

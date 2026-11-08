@@ -113,6 +113,8 @@ async def release_payments(event: BracketEvents, payments: list[BracketEntryPaym
     for p in payments:
         if p.status == "refunded" or (p.status == "forfeited" and not refund):
             continue
+        if refund and p.payer_account_id is None:
+            continue  # the payer's account is gone; there is nowhere to send it
         if not refund:
             p.status = "forfeited"
             continue
@@ -181,6 +183,8 @@ async def settle_entry(
     owed = [m for m in members if m.profile_id not in paid_profiles]
     mine = [m for m in owed if payer_of(m)]
     if mine:
+        # The Bank is 18+: a minor can't pay (or cover others) from a balance.
+        await wallet.assert_adult(payer_user_id, db)
         need = total * len(mine)
         have = await wallet.balance_of(payer_user_id, db)
         if have < need:
@@ -194,6 +198,9 @@ async def settle_entry(
     unpaid: list[Member] = []
     for m in owed:
         payer = payer_of(m) or m.account_id
+        if not payer_of(m) and await wallet.is_minor(m.account_id, db):
+            unpaid.append(m)  # a minor's own share can't come from a balance; someone 18+ can cover it
+            continue
         try:
             tx = await wallet.debit(
                 payer, total, "entry_fee", f"Entry: {event.name}" + (f" ({pass_name})" if pass_name else "") + ("" if str(payer) == str(m.account_id) else f" - for {m.username}"),

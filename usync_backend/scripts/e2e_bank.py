@@ -18,7 +18,8 @@ from sqlalchemy import select
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.core.db import AsyncSessionLocal, engine
-from app.models import UsersParent, Profiles, Teams, TeamMembers, BracketEvents, Notifications
+from datetime import date
+from app.models import UsersParent, Profiles, Teams, TeamMembers, BracketEvents, Notifications, Players
 from app.models.wallet import WalletTransactions, PlayerEventResults
 from app.schemas.brackets import Registration, MatchScore, Prize
 from app.services import brackets as svc
@@ -293,6 +294,33 @@ async def run(db):
     check("tax summary totals entry fees and withdrawals", tax["withdrawalsPaidCents"] == 500 and tax["entryFeesCents"] > 0, tax)
     check("tax CSV renders", "tax summary" in (await wallet.tax_summary_csv(a_id, year, db)))
     check("CSV text starting with = is neutralised", wallet._safe("=cmd|x").startswith("'"))
+
+    print("-- the Bank is 18+, and accounts holding money can't be closed")
+    kid_id, kid = await make_user(db, "player", "kid")
+    db.add(Players(profile_id=kid.id, first_name="Kid", last_name="Gamer", date_of_birth=date(date.today().year - 15, 1, 1)))
+    adult_id, adult = await make_user(db, "player", "adult")
+    db.add(Players(profile_id=adult.id, first_name="Ada", last_name="Gamer", date_of_birth=date(date.today().year - 30, 1, 1)))
+    await db.flush()
+    check("a 15 year old can't deposit (403)", await fails(wallet.deposit(kid_id, Decimal("10"), db)) == 403)
+    check("a 15 year old can't withdraw (403)", await fails(wallet.request_withdrawal(kid_id, Decimal("10"), db)) == 403)
+    check("an adult isn't treated as a minor", not await wallet.is_minor(adult_id, db))
+    check("an account with no date of birth isn't treated as a minor", not await wallet.is_minor(host_id, db))
+
+    team_kid = await make_team(db, adult, [adult, kid], "TK")
+    ev_kid = await make_event(db, host, [{"name": "Std", "price": "10"}], [], name="Kid Cup")
+    await wallet.credit(adult_id, 5000, "deposit", "Deposit", db)
+    await svc.register(adult_id, ev_kid.public_id, reg(team_kid), db)
+    kid_entry = next(e for e in (await svc.get_event(ev_kid.public_id, adult_id, db))["entrants"])
+    check("a minor teammate's own share isn't taken from a balance (team stays pending)", kid_entry["fullyPaid"] is False and kid_entry["status"] == "pending", kid_entry)
+    await wallet.credit(kid_id, 5000, "deposit", "Deposit", db)
+    await svc.settle_payments_for_account(kid_id, db)
+    check("even with money in the account, a minor's share isn't auto-charged", await bal(db, kid_id) == 5000)
+
+    check("closing an account with a balance is refused (409)", await fails(wallet.assert_can_close(adult_id, db)) == 409)
+    check("a minor with only a balance is also refused until it's withdrawn", await fails(wallet.assert_can_close(kid_id, db)) == 409)
+    check("a host with unfinished paid entries can't close (409)", await fails(wallet.assert_can_close(host_id, db)) == 409)
+    clean_id, clean = await make_user(db, "player", "clean")
+    check("an account with no money in motion can close", await fails(wallet.assert_can_close(clean_id, db)) is None)
 
     print("-- an unaffordable sign-up costs nothing (this rolls the session back, so it runs last)")
     e_id, e = await make_user(db, "player", "eve")
