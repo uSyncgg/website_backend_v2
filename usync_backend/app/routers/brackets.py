@@ -6,6 +6,7 @@ from app.core.dependencies import get_db, verify_supabase_jwt, optional_supabase
 from app.core.limiter import limiter, MODERATE
 from app.schemas.brackets import EventCreate, EventUpdate, EventDelay, Registration, SeedsUpdate, MatchScore, NotificationsRead, AdminInvite, AdminResponse
 from app.services import brackets as svc
+from app.services import payouts
 from app.services.notifications import list_notifications, mark_read
 
 # Bracket hosting. Every route returns the event as the bracket pages use it (camelCase), with
@@ -53,6 +54,24 @@ async def createEvent(request: Request, response: Response, body: EventCreate, c
 @router.patch("/{event_id}")
 async def updateEvent(event_id: str, body: EventUpdate, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
     return await svc.update_event(claims["sub"], event_id, body, db)
+
+@router.get("/{event_id}/finances")
+async def getEventFinances(event_id: str, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
+    return await payouts.event_finances(claims["sub"], event_id, db)
+
+@router.post("/{event_id}/cancel")
+@limiter.limit(MODERATE)
+async def cancelEvent(request: Request, response: Response, event_id: str, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
+    return await payouts.cancel_event(claims["sub"], event_id, db)
+
+@router.post("/{event_id}/close")
+@limiter.limit(MODERATE)
+async def closeEvent(request: Request, response: Response, event_id: str, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
+    return await payouts.close_event(claims["sub"], event_id, db)
+
+@router.post("/{event_id}/reopen")
+async def reopenEvent(event_id: str, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
+    return await payouts.reopen_event(claims["sub"], event_id, db)
 
 @router.delete("/{event_id}", status_code = 204)
 async def deleteEvent(event_id: str, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):

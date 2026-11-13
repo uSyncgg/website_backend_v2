@@ -162,3 +162,31 @@ async def send_event_claim_notification(
     })
 
     return None
+
+async def send_withdrawal_paid_email(to: str, amount_cents: int, receipt_number: str) -> None:
+    """
+    Asynchronous function to tell a player their net 30 withdrawal has been paid out.
+
+    ::param to the string containing the account email
+    ::param amount_cents int containing the amount paid out
+    ::param receipt_number the receipt number shown on the Bank page for this withdrawal
+    """
+
+    body = f"""
+    <html>
+    <body style="font-family: sans-serif; color: #111111;">
+        <h2>Your withdrawal has been paid</h2>
+        <p>Your withdrawal of <strong>${amount_cents / 100:,.2f}</strong> from your uSync balance has been paid out.</p>
+        <p>Receipt number: {html.escape(receipt_number)}. You can view and download it any time on the Bank page at usync.gg/bank.</p>
+    </body>
+    </html>
+    """
+
+    await resend.Emails.send_async({
+        "from": FROM_EMAIL,
+        "to": [to],
+        "subject": "Your uSync withdrawal has been paid",
+        "html": body,
+    })
+
+    return None

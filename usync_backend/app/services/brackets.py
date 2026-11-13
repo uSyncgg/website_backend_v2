@@ -10,9 +10,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.users import Profiles
 from app.models.teams import Teams, TeamMembers
 from app.models.brackets import BracketEvents, BracketEntries, BracketEventAdmins
+from app.models.wallet import BracketEntryPayments
 from app.services import bracket_engine as engine
 from app.services.notifications import notify
-from app.schemas.brackets import EventCreate, EventUpdate, EventDelay, Registration, MatchScore, AdminInvite
+from app.services import entry_payments
+from app.schemas.brackets import EventCreate, EventUpdate, EventDelay, Registration, MatchScore, AdminInvite, Prize
 
 # Bracket hosting: events a host or venue profile runs, their sign-ups and their brackets.
 #
@@ -209,7 +211,7 @@ def _refresh_statuses(event: BracketEvents, entries: list[BracketEntries]) -> li
     changes = []
 
     def full(e):
-        return e.team_id is None or len(e.roster or []) >= event.team_size
+        return e.fully_paid and (e.team_id is None or len(e.roster or []) >= event.team_size)
 
     for e in entries:
         if e.status == "signed_up" and not full(e):
@@ -256,6 +258,20 @@ async def _events_out(events: list[BracketEvents], user_id: str | None, db: Asyn
     team_public = dict((await db.execute(select(Teams.id, Teams.public_id).where(Teams.id.in_(team_ids)))).all()) if team_ids else {}
     mine = await _my_profile_ids(user_id, db)
     team_roles = await _my_team_roles(user_id, db)
+    paid_rows = (await db.execute(
+        select(BracketEntryPayments).where(BracketEntryPayments.event_id.in_(event_ids)).where(BracketEntryPayments.status == "paid")
+    )).scalars().all()
+    paid_by_entry: dict = {}
+    for p in paid_rows:
+        paid_by_entry.setdefault(p.entry_id, {})[p.member_username] = p
+    payer_ids = {p.payer_account_id for p in paid_rows}
+    payer_names: dict = {}
+    if payer_ids:
+        for account_id, username, ptype in (await db.execute(
+            select(Profiles.account_id, Profiles.username, Profiles.type).where(Profiles.account_id.in_(payer_ids))
+        )).all():
+            if account_id not in payer_names or ptype == "player":
+                payer_names[account_id] = username
     admin_rows = (await db.execute(
         select(BracketEventAdmins, Profiles).join(Profiles, Profiles.id == BracketEventAdmins.profile_id)
         .where(BracketEventAdmins.event_id.in_(event_ids)).order_by(BracketEventAdmins.created_at)
@@ -292,9 +308,30 @@ async def _events_out(events: list[BracketEvents], user_id: str | None, db: Asyn
                 "roster": roster,
                 "rosterSize": len(roster),
                 "teammates": [n for n in roster if n != captain],
+                "fullyPaid": x.fully_paid,
             }
             if can_manage or can_act:
                 entrant.update({"email": x.email, "answers": x.answers or {}, "pass": x.pass_name})
+                try:
+                    cost = entry_payments.entry_cost(event, x.pass_name)
+                except HTTPException:
+                    cost = None
+                if cost:
+                    # Who has paid their share (and who covered them), for the host and the team.
+                    names = (roster[:event.team_size] if x.team_id is not None else [captain]) or [captain]
+                    shares = paid_by_entry.get(x.id, {})
+                    players = [
+                        {
+                            "username": n,
+                            "paid": n in shares,
+                            "paidBy": payer_names.get(shares[n].payer_account_id) if n in shares else None,
+                        }
+                        for n in names
+                    ]
+                    entrant["payment"] = {
+                        "priceCents": cost[0], "feeCents": cost[1], "players": players,
+                        "paidCount": sum(1 for pl in players if pl["paid"]), "totalCount": len(players),
+                    }
             entrants.append(entrant)
 
         out.append({
@@ -321,6 +358,12 @@ async def _events_out(events: list[BracketEvents], user_id: str | None, db: Asyn
             "registrationOpen": event.registration_open,
             "noShowMinutes": event.no_show_minutes,
             "payments": event.payments or {"enabled": False},
+            "prizes": event.prizes or [],
+            "cancelledAt": _iso(event.cancelled_at),
+            "closedAt": _iso(event.closed_at),
+            "payoutAt": _iso(event.payout_due_at),
+            "paidOutAt": _iso(event.paid_out_at),
+            "refundable": entry_payments.refundable(event),
             "signupForm": event.signup_form or {"playerFields": [], "questions": []},
             "delays": event.delays or [],
             "bracket": event.bracket,
@@ -442,6 +485,7 @@ async def create_event(user_id: str, body: EventCreate, db: AsyncSession) -> dic
         registration_open = body.registration_open,
         no_show_minutes = body.no_show_minutes,
         payments = body.payments,
+        prizes = _prizes_stored(body.prizes, body.payments),
         signup_form = body.signup_form.model_dump(by_alias = True),
         delays = [],
         bracket = None,
@@ -452,6 +496,27 @@ async def create_event(user_id: str, body: EventCreate, db: AsyncSession) -> dic
         await _invite_admin(event, host, profile_public_id, db)
     await db.commit()
     return await _event_out(event, user_id, db)
+
+def _prizes_stored(prizes: list[Prize] | None, payments: dict | None) -> list[dict]:
+    """
+    Prizes as saved on the event: { place, amountCents } or { place, percent }. They're paid out of
+    the entry revenue, so an event needs uSync payments turned on to have them, and percents can't
+    add up to more than 100.
+    """
+
+    if not prizes:
+        return []
+    if not (payments or {}).get("enabled"):
+        raise HTTPException(status_code=422, detail="Prizes are paid from entry fees - turn on uSync payments for this event first.")
+    places = [p.place for p in prizes]
+    if len(set(places)) != len(places):
+        raise HTTPException(status_code=422, detail="Each place can only have one prize.")
+    if sum(float(p.percent) for p in prizes if p.percent is not None) > 100:
+        raise HTTPException(status_code=422, detail="Prize percents can't add up to more than 100%.")
+    return [
+        {"place": p.place, "amountCents": int(p.amount * 100)} if p.amount is not None else {"place": p.place, "percent": float(p.percent)}
+        for p in sorted(prizes, key = lambda p: p.place)
+    ]
 
 def _check_limits(min_entrants, max_entrants, final_best_of) -> None:
     if min_entrants is not None and max_entrants is not None and min_entrants > max_entrants:
@@ -469,6 +534,10 @@ async def update_event(user_id: str, public_id: str, body: EventUpdate, db: Asyn
             raise HTTPException(status_code=409, detail="The bracket is live, so sign-ups can't reopen.")
     if "final_best_of" in values and event.format not in engine.FINAL_FORMATS:
         values["final_best_of"] = None
+    if "prizes" in values:
+        if _published(event) or event.closed_at:
+            raise HTTPException(status_code=409, detail="Prizes are locked once the bracket is live.")
+        values["prizes"] = _prizes_stored(body.prizes, event.payments)
     _check_limits(values.get("min_entrants", event.min_entrants), values.get("max_entrants", event.max_entrants), values.get("final_best_of"))
     for key, value in values.items():
         setattr(event, key, value.strip() if isinstance(value, str) and key != "description" and key != "rules" else value)
@@ -480,7 +549,9 @@ async def update_event(user_id: str, public_id: str, body: EventUpdate, db: Asyn
     return await _event_out(event, user_id, db)
 
 async def delete_event(user_id: str, public_id: str, db: AsyncSession) -> None:
-    event = await _owner_event(user_id, public_id, db)
+    event = await _owner_event(user_id, public_id, db, lock = True)
+    if not event.paid_out_at and not event.cancelled_at:
+        await entry_payments.refund_event(event, db, "The event was deleted.")
     await db.delete(event)
     await db.commit()
 
@@ -505,6 +576,8 @@ async def delay_start(user_id: str, public_id: str, body: EventDelay, db: AsyncS
 
 async def register(user_id: str, public_id: str, body: Registration, db: AsyncSession) -> dict:
     event = await _event_by_public_id(public_id, db, lock = True)
+    if event.cancelled_at:
+        raise HTTPException(status_code=409, detail="This event was cancelled.")
     if _published(event) or not event.registration_open:
         raise HTTPException(status_code=409, detail="Sign-ups are closed.")
     entries = await _entries(event.id, db)
@@ -552,15 +625,30 @@ async def register(user_id: str, public_id: str, body: Registration, db: AsyncSe
             email = body.email, answers = body.answers, pass_name = body.pass_name, roster = roster,
         )
 
+    # Paid events: every player owes the pass price + the 5% uSync fee. You pay your own share and
+    # any teammates you cover (body.pay_for); the others are charged to their own balances, and the
+    # team stays pending until every share is paid. All in one transaction with the entry, so a
+    # failed or duplicate sign-up never costs anything.
+    cost = entry_payments.entry_cost(event, body.pass_name)
     db.add(entry)
     try:
-        await db.commit()
+        await db.flush()
     except IntegrityError:
         await db.rollback()
         raise HTTPException(status_code=409, detail="Already signed up.")
+    if cost:
+        try:
+            unpaid = await entry_payments.settle_entry(event, entry, cost, db, payer_user_id = user_id, cover = set(body.pay_for))
+        except HTTPException:
+            await db.rollback()
+            raise
+        if unpaid:
+            entry.status = "pending"
+    await db.commit()
     return await _event_out(event, user_id, db)
 
-async def _remove_entry(event: BracketEvents, entry: BracketEntries, db: AsyncSession) -> None:
+async def _remove_entry(event: BracketEvents, entry: BracketEntries, db: AsyncSession, *, refund: bool, reason: str) -> None:
+    await entry_payments.release_entry(event, entry, db, refund = refund, reason = reason)
     await db.delete(entry)
     await db.flush()
     entries = await _entries(event.id, db)
@@ -580,7 +668,8 @@ async def unregister(user_id: str, public_id: str, db: AsyncSession) -> dict:
     if not out["viewerEntrantId"] or not out["viewerCanAct"]:
         raise HTTPException(status_code=404, detail="You're not signed up.")
     entry = await db.get(BracketEntries, uuid.UUID(out["viewerEntrantId"]))
-    await _remove_entry(event, entry, db)
+    # Money comes back while sign-ups are open; once they've closed it stays with the event.
+    await _remove_entry(event, entry, db, refund = entry_payments.refundable(event), reason = "You left the event before registration closed.")
     return await _event_out(event, user_id, db)
 
 async def remove_entrant(user_id: str, public_id: str, entrant_id: uuid.UUID, db: AsyncSession) -> dict:
@@ -590,7 +679,7 @@ async def remove_entrant(user_id: str, public_id: str, entrant_id: uuid.UUID, db
     entry = await db.get(BracketEntries, entrant_id)
     if not entry or entry.event_id != event.id:
         raise HTTPException(status_code=404, detail="Entrant not found.")
-    await _remove_entry(event, entry, db)
+    await _remove_entry(event, entry, db, refund = True, reason = "The host removed you from the event.")
     return await _event_out(event, user_id, db)
 
 # ---- rosters (called from app.services.teams) ------------------------------
@@ -631,8 +720,42 @@ async def sync_team(team_id, db: AsyncSession) -> None:
             if e.team_id == team_id:
                 e.roster = roster
                 e.name = team.name
+                await db.flush()
+                cost = entry_payments.entry_cost(event, e.pass_name) if not event.cancelled_at else None
+                if cost:
+                    # Players who left are refunded (while sign-ups are open); new ones pay their share if they can.
+                    await entry_payments.settle_entry(event, e, cost, db)
         changes = _refresh_statuses(event, entries)
         _notify_status_changes(db, event, changes, await _entry_accounts([c[0] for c in changes], db))
+
+async def settle_payments_for_account(user_id: str, db: AsyncSession) -> None:
+    """
+    After an account's balance goes up (a deposit, a withdrawal cancelled): takes the shares it
+    owes in teams that are still waiting on them, and moves those teams to signed up when that
+    was the last share. Commits.
+    """
+
+    mine = select(Profiles.id).where(Profiles.account_id == user_id)
+    team_ids = select(TeamMembers.team_id).where(TeamMembers.profile_id.in_(mine))
+    waiting = (await db.execute(
+        select(BracketEntries).where(BracketEntries.fully_paid.is_(False)).where(BracketEntries.team_id.in_(team_ids))
+    )).scalars().all()
+
+    events: dict = {}
+    for entry in waiting:
+        event = events.get(entry.event_id) or await db.get(BracketEvents, entry.event_id)
+        events[entry.event_id] = event
+        if _published(event) or event.cancelled_at:
+            continue
+        cost = entry_payments.entry_cost(event, entry.pass_name)
+        if cost:
+            await entry_payments.settle_entry(event, entry, cost, db, quiet = True)
+
+    for event in events.values():
+        entries = await _entries(event.id, db)
+        changes = _refresh_statuses(event, entries)
+        _notify_status_changes(db, event, changes, await _entry_accounts([c[0] for c in changes], db))
+    await db.commit()
 
 async def before_team_deleted(team_id, db: AsyncSession) -> list:
     """
@@ -647,6 +770,13 @@ async def before_team_deleted(team_id, db: AsyncSession) -> list:
     )).scalars().all()
     upcoming = [e.id for e in events if not _published(e)]
     if upcoming:
+        entry_ids = (await db.execute(
+            select(BracketEntries.id).where(BracketEntries.team_id == team_id).where(BracketEntries.event_id.in_(upcoming))
+        )).scalars().all()
+        upcoming_events = {e.id: e for e in events}
+        for entry in (await db.execute(select(BracketEntries).where(BracketEntries.id.in_(entry_ids)))).scalars().all():
+            event = upcoming_events[entry.event_id]
+            await entry_payments.release_entry(event, entry, db, refund = entry_payments.refundable(event), reason = "The team was deleted before registration closed.")
         await db.execute(delete(BracketEntries).where(BracketEntries.team_id == team_id).where(BracketEntries.event_id.in_(upcoming)))
     return upcoming
 
@@ -703,6 +833,8 @@ async def publish(user_id: str, public_id: str, db: AsyncSession) -> dict:
     """
 
     event = await _host_event(user_id, public_id, db, lock = True)
+    if event.cancelled_at:
+        raise HTTPException(status_code=409, detail="This event was cancelled.")
     if not event.bracket:
         raise HTTPException(status_code=409, detail="Save a seeding first.")
     if _published(event):

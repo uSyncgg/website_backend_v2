@@ -15,6 +15,15 @@ from app.models.brackets import Notifications
 #   opponent_reported { event_id, event_name, match_id, opponent }    the other side reported a score - confirm yours
 #   score_disputed    { event_id, event_name, match_id, opponent }    the two reports disagree; the host decides
 #   no_show_reported  { event_id, event_name, match_id, opponent, against_you }
+#   entry_payment_due { event_id, event_name, team_name, amount_cents } your team entered and your share isn't paid yet
+#   entry_paid_for_you { event_id, event_name, payer, amount_cents }   a teammate covered your share
+#   entry_refunded    { event_id, event_name, amount_cents, reason }
+#   event_cancelled   { event_id, event_name, refunded }
+#   event_closed      { event_id, event_name, payout_at, prizes }       results are final; payouts follow
+#   event_reopened    { event_id, event_name }                          the close was undone (results changed)
+#   prize_won         { event_id, event_name, place, amount_cents }
+#   host_payout       { event_id, event_name, amount_cents, collected_cents }
+#   withdrawal_paid   { amount_cents, receipt, transaction_id }
 #
 # Helpers here only add rows to the session; the caller commits with the rest of its change.
 

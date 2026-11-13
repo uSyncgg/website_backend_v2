@@ -46,6 +46,12 @@ class BracketEvents(Base):
     signup_form: Mapped[dict] = mapped_column(JSONB, default = dict, server_default = text("'{}'::jsonb"))
     delays: Mapped[list] = mapped_column(JSONB, default = list, server_default = text("'[]'::jsonb"))
     bracket: Mapped[dict | None] = mapped_column(JSONB, nullable = True)
+    prizes: Mapped[list] = mapped_column(JSONB, default = list, server_default = text("'[]'::jsonb"))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone = True), nullable = True)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone = True), nullable = True)
+    payout_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone = True), nullable = True)
+    paid_out_at: Mapped[datetime | None] = mapped_column(DateTime(timezone = True), nullable = True)
+    payout_summary: Mapped[dict] = mapped_column(JSONB, default = dict, server_default = text("'{}'::jsonb"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = text("now()"))
 
     __table_args__ = (
@@ -54,6 +60,7 @@ class BracketEvents(Base):
         CheckConstraint("format IN ('single_elim', 'double_elim', 'round_robin', 'swiss')", name = "ck_bracket_events_format"),
         CheckConstraint("platform IN ('pc_allowed', 'console_only')", name = "ck_bracket_events_platform"),
         CheckConstraint("team_size BETWEEN 1 AND 10", name = "ck_bracket_events_team_size"),
+        Index("ix_bracket_events_payout_due", "payout_due_at", postgresql_where = text("paid_out_at IS NULL AND payout_due_at IS NOT NULL")),
     )
 
 class BracketEntries(Base):
@@ -76,6 +83,7 @@ class BracketEntries(Base):
     name: Mapped[str] = mapped_column()
     status: Mapped[str] = mapped_column(default = "signed_up", server_default = text("'signed_up'"))
     rating: Mapped[int] = mapped_column(default = 1200, server_default = text("1200"))
+    fully_paid: Mapped[bool] = mapped_column(default = True, server_default = text("true"))
     email: Mapped[str] = mapped_column(default = "", server_default = text("''"))
     answers: Mapped[dict] = mapped_column(JSONB, default = dict, server_default = text("'{}'::jsonb"))
     pass_name: Mapped[str | None] = mapped_column(nullable = True)
