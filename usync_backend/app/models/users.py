@@ -7,7 +7,7 @@ from sqlalchemy import ForeignKey, ForeignKeyConstraint, String, DateTime, text,
 from sqlalchemy.dialects.postgresql import ARRAY, ENUM, ExcludeConstraint
 
 # The enum types are created by the migration, so the models never try to create them.
-PROFILE_TYPE = ENUM("player", "host", "venue", name = "profile_type", create_type = False)
+PROFILE_TYPE = ENUM("player", "host", "venue", "org", name = "profile_type", create_type = False)
 LINK_PLATFORM = ENUM(
     "twitch", "twitter", "youtube", "kick", "discord", "instagram",
     "cmg", "gankster", "faceit", "battlefy",
@@ -40,7 +40,7 @@ class UsersParent(Base):
 class Profiles(Base):
     """
     SQL Alchemy model describing the profiles table. One row per public profile; an account has
-    at most one profile of each type. The type's own details live in players, hosts or venues.
+    at most one profile of each type. The type's own details live in players, hosts, venues or organizations.
     """
 
     __tablename__ = "profiles"
@@ -127,6 +127,24 @@ class Hosts(Base):
     organization: Mapped[str] = mapped_column()
     host_country: Mapped[str] = mapped_column()
     event_types: Mapped[list[str]] = mapped_column(ARRAY(String), default = [], nullable = True)
+
+class Organizations(Base):
+    """
+    SQL Alchemy model describing the organizations table: the details of an org profile.
+    `organization` mirrors the profile's username (an org's name is its username); it's kept in
+    step whenever the username changes. `verified` is set by uSync, never by the org.
+    """
+
+    __tablename__ = "organizations"
+
+    profile_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("profiles.id", ondelete = "CASCADE"), primary_key = True)
+    organization: Mapped[str] = mapped_column()
+    org_country: Mapped[str] = mapped_column()
+    games: Mapped[list[str]] = mapped_column(ARRAY(String), default = [], nullable = True)
+    other_games: Mapped[str | None] = mapped_column(nullable = True)
+    verified: Mapped[bool] = mapped_column(default = False, server_default = text("false"))
+    website: Mapped[str | None] = mapped_column(nullable = True)
+    contact_email: Mapped[str | None] = mapped_column(nullable = True)
 
 class Venues(Base):
     """

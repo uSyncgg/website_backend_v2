@@ -33,9 +33,12 @@ from app.schemas.users import (
     ProfileUpdate,
     PlayerUpdate,
     HostUpdate,
-    VenueUpdate
+    VenueUpdate,
+    OrgPublic,
+    OrgSettings,
+    OrgUpdate
 )
-from app.models.users import UsersParent, Profiles, ProfileLinks, Players, Hosts, Venues
+from app.models.users import UsersParent, Profiles, ProfileLinks, Players, Hosts, Venues, Organizations
 from PIL import Image, ImageOps, UnidentifiedImageError
 from supabase import AsyncClient
 from storage3.utils import StorageException
@@ -51,13 +54,18 @@ ALLOWED_SYMBOLS = {"_", ".", "-"}
 ALLOWED_CHAR_FORMATS = {"‌", "‍"}
 MIN_USER_LEN = 4
 MAX_USER_LEN = 25
+MAX_ORG_NAME_LEN = 40
+# An org's username is its organization name, which can have spaces and run a little longer.
+SPACED_USERNAME_TYPES = {"org"}
 _SPLIT_RE = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Za-z])(?=\d)|(?<=\d)(?=[A-Za-z])")
 
 # public_id goes in profile URLs: random (not sequential, so profiles can't be enumerated) and short.
 PUBLIC_ID_ALPHABET = string.ascii_lowercase + string.digits
 PUBLIC_ID_LENGTH = 10
 
-DETAIL_UPDATES = {"player": PlayerUpdate, "host": HostUpdate, "venue": VenueUpdate}
+DETAIL_UPDATES = {"player": PlayerUpdate, "host": HostUpdate, "venue": VenueUpdate, "org": OrgUpdate}
+# Orgs enter events but never run them, so they can't turn on bracket hosting.
+NO_BRACKET_HOSTING = {"org"}
 GAME_ACCOUNT_LABELS = {"battlenet": "Battle.net", "activision": "Activision", "steam": "Steam", "riot": "Riot"}
 LINK_LABELS = {
     "twitch": "Twitch", "twitter": "Twitter", "youtube": "YouTube", "kick": "Kick", "discord": "Discord",
@@ -112,7 +120,7 @@ def _canonical_handle(handle: str) -> str:
 def _new_public_id() -> str:
     return "".join(secrets.choice(PUBLIC_ID_ALPHABET) for _ in range(PUBLIC_ID_LENGTH))
 
-def _build_profile(profile: ProfileIn, account_id: str, pfp_url: str | None) -> tuple[Profiles, list[ProfileLinks | Players | Hosts | Venues]]:
+def _build_profile(profile: ProfileIn, account_id: str, pfp_url: str | None) -> tuple[Profiles, list[ProfileLinks | Players | Hosts | Venues | Organizations]]:
     """
     Builds a profiles row and the rows that hang off it (links and the type's details). The
     profile's id is set here so the child rows can point at it before anything is flushed.
@@ -127,12 +135,12 @@ def _build_profile(profile: ProfileIn, account_id: str, pfp_url: str | None) -> 
         canonical_username = _canonical_username(profile.username),
         bio = profile.bio,
         profile_picture = pfp_url,
-        bracket_hosting = profile.bracket_hosting,
+        bracket_hosting = profile.bracket_hosting and profile.type not in NO_BRACKET_HOSTING,
         other_roles = sorted(profile.other_roles) if profile.other_roles is not None else None,
         other_role_detail = profile.other_role_detail
     )
 
-    children: list[ProfileLinks | Players | Hosts | Venues] = [
+    children: list[ProfileLinks | Players | Hosts | Venues | Organizations] = [
         ProfileLinks(
             profile_id = row.id,
             account_id = account_id,
@@ -169,6 +177,17 @@ def _build_profile(profile: ProfileIn, account_id: str, pfp_url: str | None) -> 
             organization = details.organization,
             host_country = details.host_country,
             event_types = details.event_types
+        ))
+    elif profile.type == "org":
+        children.append(Organizations(
+            profile_id = row.id,
+            # The org's name is its username; it's asked for once, on the username step.
+            organization = profile.username,
+            org_country = details.org_country,
+            games = details.games,
+            other_games = details.other_games,
+            website = details.website,
+            contact_email = details.contact_email
         ))
     else:
         # Keyed by name since (profile_id, venue_name) is the primary key.
@@ -229,28 +248,32 @@ async def openai_username_moderation(normalized_username: str, split_username: s
 
     return None
 
-def _check_user_restrictions(canonical_username: str) -> None:
+def _check_user_restrictions(canonical_username: str, allow_spaces: bool = False) -> None:
     """
-    
+    Length and character rules. An org's username is its organization name, so it may also have
+    single spaces between words and run up to MAX_ORG_NAME_LEN characters.
     """
 
     if len(canonical_username) < MIN_USER_LEN:
         raise ValueError("Username is too short.")
 
-    if len(canonical_username) > MAX_USER_LEN:
+    if len(canonical_username) > (MAX_ORG_NAME_LEN if allow_spaces else MAX_USER_LEN):
         raise ValueError("Username is too long.")
+
+    if allow_spaces and "  " in canonical_username:
+        raise ValueError("Use single spaces between words.")
 
     combining_run = 0
     for ch in canonical_username:
         cat = unicodedata.category(ch)
-        if cat.startswith("L") or cat == "Nd" or ch in ALLOWED_SYMBOLS:
+        if cat.startswith("L") or cat == "Nd" or ch in ALLOWED_SYMBOLS or (allow_spaces and ch == " "):
             combining_run = 0
         elif cat.startswith("M"):          
             combining_run += 1
             if combining_run > 2:
                 raise ValueError("Too many accent marks on one character.")
         else:
-            raise ValueError("Usernames can only contain letters, numbers, and _ . -")
+            raise ValueError("Names can only contain letters, numbers, spaces and _ . -" if allow_spaces else "Usernames can only contain letters, numbers, and _ . -")
 
     return None
 
@@ -408,7 +431,7 @@ def _check_picture_files(profiles: list[ProfileIn], files: dict[str, UploadFile 
 
     return None
 
-async def validate_username(username: str, openai: AsyncOpenAI, loc: tuple) -> None:
+async def validate_username(username: str, openai: AsyncOpenAI, loc: tuple, profile_type: str | None = None) -> None:
     """
     The format and moderation rules for a new username. Doesn't touch the database, so it can
     run (including the OpenAI call) without holding a connection.
@@ -419,7 +442,7 @@ async def validate_username(username: str, openai: AsyncOpenAI, loc: tuple) -> N
     canonical_username = _canonical_username(username)
 
     try:
-        _check_user_restrictions(canonical_username)
+        _check_user_restrictions(canonical_username, profile_type in SPACED_USERNAME_TYPES)
         _check_display_chars(username)
         profanity_moderation(normalized, split)
         await openai_username_moderation(normalized, split, openai)
@@ -450,7 +473,7 @@ async def check_valid_username(username: str, profile_type: ProfileType, db: Asy
     Full check used by the sign up form's live username field.
     """
 
-    await validate_username(username, openai, loc)
+    await validate_username(username, openai, loc, profile_type)
     await check_username_available(username, profile_type, db, loc)
 
     return None
@@ -485,7 +508,7 @@ async def handle_registration(
     await db.rollback()
 
     for i, profile in enumerate(payload.profiles):
-        await validate_username(profile.username, openai, ("body", "profiles", i, "username"))
+        await validate_username(profile.username, openai, ("body", "profiles", i, "username"), profile.type)
 
     urls, paths = await _prepare_pictures(payload, files, supabase, user_id, openai)
 
@@ -640,6 +663,15 @@ async def get_profile(public_id: str, db: AsyncSession) -> Profile:
             hosted_games = _without_other(host.games),
             event_types = host.event_types or []
         )
+    elif profile.type == "org":
+        org = (await db.execute(select(Organizations).where(Organizations.profile_id == profile.id))).scalars().one()
+        details = OrgPublic(
+            organization = org.organization,
+            verified = org.verified,
+            games = _without_other(org.games),
+            website = org.website,
+            contact_email = org.contact_email
+        )
     else:
         details = VenuePublic(locations = await _locations(profile.id, db))
 
@@ -702,6 +734,17 @@ async def get_profile_settings(user_id: str, profile_type: ProfileType, db: Asyn
             host_country = host.host_country,
             event_types = host.event_types or []
         )
+    elif profile_type == "org":
+        org = (await db.execute(select(Organizations).where(Organizations.profile_id == profile.id))).scalars().one()
+        details = OrgSettings(
+            organization = org.organization,
+            verified = org.verified,
+            org_country = org.org_country,
+            games = org.games or [],
+            other_games = org.other_games,
+            website = org.website,
+            contact_email = org.contact_email
+        )
     else:
         details = VenueSettings(locations = await _locations(profile.id, db))
 
@@ -759,7 +802,7 @@ async def add_profile(
     # Release the connection before the outside calls below.
     await db.rollback()
 
-    await validate_username(profile.username, openai, ("body", "username"))
+    await validate_username(profile.username, openai, ("body", "username"), profile.type)
 
     pfp_url = None
     pfp_path = None
@@ -830,7 +873,7 @@ async def _apply_profile_changes(
                 [{"profile_id": profile_id, "venue_name": name, "location": location} for name, location in unique_locations.items()]
             )
         else:
-            table = Players if profile_type == "player" else Hosts
+            table = {"player": Players, "host": Hosts, "org": Organizations}[profile_type]
             await db.execute(update(table).where(table.profile_id == profile_id).values(**details_values))
 
     return None
@@ -854,6 +897,9 @@ async def update_profile(user_id: str, profile_type: ProfileType, changes: Profi
                 status_code=422,
                 detail=[{**err, "loc": ["body", "details", *err["loc"]]} for err in e.errors(include_context=False, include_url=False)]
             )
+
+    if profile_type in NO_BRACKET_HOSTING and payload.get("bracket_hosting"):
+        raise _field_error(("body", "bracket_hosting"), "Organizations can't host brackets. Use a host profile to run events.")
 
     profile = await _get_own_profile(user_id, profile_type, db)
     profile_id = profile.id
@@ -933,12 +979,17 @@ async def change_username(user_id: str, profile_type: ProfileType, username: str
         # Release the connection before the moderation call.
         await db.rollback()
 
-        await validate_username(username, openai, loc)
+        await validate_username(username, openai, loc, profile_type)
 
     try:
         await db.execute(
             update(Profiles).where(Profiles.id == profile_id).values(username = username.strip(), canonical_username = canonical)
         )
+        # An org's name is its username, so renaming one renames the other (same transaction).
+        if profile_type == "org":
+            await db.execute(
+                update(Organizations).where(Organizations.profile_id == profile_id).values(organization = username.strip())
+            )
         await db.commit()
     except IntegrityError as e:
         await db.rollback()
@@ -961,7 +1012,7 @@ async def set_default_profile(user_id: str, profile_type: ProfileType, db: Async
 async def delete_profile(user_id: str, profile_type: ProfileType, db: AsyncSession, supabase: AsyncClient) -> Me:
     """
     Deletes one of the user's profiles. Removing the profiles row cascades to its players/hosts/
-    venues details, links and comp site accounts. The account's only profile can't be deleted
+    venues/organizations details, links and comp site accounts. The account's only profile can't be deleted
     (409, delete the account instead). If it was the default, the oldest remaining profile
     becomes the default first, since the default_profile FK won't let it point at a deleted row.
     """

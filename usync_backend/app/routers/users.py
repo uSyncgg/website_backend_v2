@@ -45,6 +45,7 @@ async def registerUser(
     profile_picture_player: UploadFile | None = File(None),
     profile_picture_host: UploadFile | None = File(None),
     profile_picture_venue: UploadFile | None = File(None),
+    profile_picture_org: UploadFile | None = File(None),
     claims: dict = Depends(verify_supabase_jwt),
     db: AsyncSession = Depends(get_db),
     supabase: AsyncClient = Depends(get_supabase),
@@ -63,7 +64,8 @@ async def registerUser(
     files = {
         "player": profile_picture_player,
         "host": profile_picture_host,
-        "venue": profile_picture_venue
+        "venue": profile_picture_venue,
+        "org": profile_picture_org
     }
 
     return await handle_registration(payload, files, claims["email"], claims["sub"], db, supabase, openai)
@@ -125,7 +127,7 @@ async def addProfile(
     claims: dict = Depends(verify_supabase_jwt)
 ):
     """
-    Adds a profile of a new type (player, host or venue) to the signed in user's account.
+    Adds a profile of a new type (player, host, venue or org) to the signed in user's account.
     409 if they already have one of that type or the username is taken.
     """
 
