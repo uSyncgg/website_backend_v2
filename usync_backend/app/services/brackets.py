@@ -12,6 +12,7 @@ from app.models.teams import Teams, TeamMembers
 from app.models.brackets import BracketEvents, BracketEntries, BracketEventAdmins
 from app.services import bracket_engine as engine
 from app.services.notifications import notify
+from app.services import chat_rooms
 from app.schemas.brackets import EventCreate, EventUpdate, EventDelay, Registration, MatchScore, AdminInvite
 
 # Bracket hosting: events a host or venue profile runs, their sign-ups and their brackets.
@@ -492,6 +493,7 @@ async def delay_start(user_id: str, public_id: str, body: EventDelay, db: AsyncS
     event = await _host_event(user_id, public_id, db, lock = True)
     event.delays = [*(event.delays or []), {"from": _iso(event.starts_at), "to": _iso(body.starts_at), "reason": body.reason.strip(), "at": _iso(_now())}]
     event.starts_at = body.starts_at
+    await chat_rooms.sync_rooms(db, event)
 
     entries = await _entries(event.id, db)
     accounts = await _entry_accounts(entries, db)
@@ -717,12 +719,14 @@ async def publish(user_id: str, public_id: str, db: AsyncSession) -> dict:
     event.bracket = {**event.bracket, "published": True}
     event.registration_open = False
     await _notify_new_ready(db, event, None, _built(event))
+    await chat_rooms.sync_rooms(db, event)
     await db.commit()
     return await _event_out(event, user_id, db)
 
 async def reset_bracket(user_id: str, public_id: str, db: AsyncSession) -> dict:
     event = await _host_event(user_id, public_id, db, lock = True)
     event.bracket = None
+    await chat_rooms.delete_event_rooms(db, event)
     entries = await _entries(event.id, db)
     rosters = await _team_rosters({e.team_id for e in entries if e.team_id}, db)
     for e in entries:
@@ -768,6 +772,7 @@ def _result(match: dict, score_a: int, score_b: int, forfeit: bool = False) -> d
 async def _commit_bracket(event: BracketEvents, bracket: dict, before: dict, user_id: str, db: AsyncSession) -> dict:
     event.bracket = bracket
     await _notify_new_ready(db, event, before, _built(event))
+    await chat_rooms.sync_rooms(db, event)
     await db.commit()
     return await _event_out(event, user_id, db)
 
@@ -838,6 +843,10 @@ async def player_report(user_id: str, public_id: str, match_id: str, body: Match
         for side, other in ((me, opponent_id), (opponent_id, me)):
             notify(db, accounts.get(entries[side].id, ()), "score_disputed", {**data, "opponent": entries[other].name})
         notify(db, await _manager_accounts(event, db), "score_disputed", {**data, "opponent": f"{entries[me].name} vs {entries[opponent_id].name}", "host": True})
+        # A dispute brings an admin into the match chat on its own.
+        room = await chat_rooms.get_room(db, event, match_id)
+        if room:
+            chat_rooms.invite_admin(db, room, "dispute", "The scores don't match, so an admin has been invited to this chat to sort it out.")
     else:
         notify(db, accounts.get(entries[opponent_id].id, ()), "opponent_reported", {**data, "opponent": entries[me].name})
     await db.commit()
@@ -865,6 +874,9 @@ async def report_no_show(user_id: str, public_id: str, match_id: str, db: AsyncS
     data = {"event_id": event.public_id, "event_name": event.name, "match_id": match_id}
     notify(db, accounts.get(entries[against].id, ()), "no_show_reported", {**data, "opponent": entries[me].name, "against_you": True})
     notify(db, await _manager_accounts(event, db), "no_show_reported", {**data, "opponent": entries[against].name, "against_you": False, "host": True})
+    room = await chat_rooms.get_room(db, event, match_id)
+    if room:
+        chat_rooms.invite_admin(db, room, "no_show", f"{entries[me].name} reported {entries[against].name} as a no-show, so an admin has been invited to this chat.")
     await db.commit()
     return await _event_out(event, user_id, db)
 

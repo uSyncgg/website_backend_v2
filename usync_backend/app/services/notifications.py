@@ -15,6 +15,7 @@ from app.models.brackets import Notifications
 #   opponent_reported { event_id, event_name, match_id, opponent }    the other side reported a score - confirm yours
 #   score_disputed    { event_id, event_name, match_id, opponent }    the two reports disagree; the host decides
 #   no_show_reported  { event_id, event_name, match_id, opponent, against_you }
+#   chat_admin_requested { event_id, event_name, match_id, opponent, reason, host }  a player asked for an admin in a match chat
 #
 # Helpers here only add rows to the session; the caller commits with the rest of its change.
 
