@@ -1,12 +1,13 @@
 import re
 
 from datetime import date
-from pydantic import BaseModel, model_validator, ConfigDict, StringConstraints, Field, BeforeValidator, AfterValidator, PlainSerializer
+from urllib.parse import urlsplit
+from pydantic import BaseModel, model_validator, ConfigDict, StringConstraints, Field, BeforeValidator, AfterValidator, PlainSerializer, EmailStr
 from typing import Any, Literal, ClassVar, Annotated
 
 NONEMPTYSTR = Annotated[str, StringConstraints(min_length=1)]
 
-ProfileType = Literal["player", "host", "venue"]
+ProfileType = Literal["player", "host", "venue", "org"]
 # Socials plus competitive site accounts (CMG, Gankster, FACEIT, Battlefy).
 LinkPlatform = Literal["twitch", "twitter", "youtube", "kick", "discord", "instagram", "cmg", "gankster", "faceit", "battlefy"]
 PictureSource = Literal["upload", "copy_default"]
@@ -14,7 +15,8 @@ PictureSource = Literal["upload", "copy_default"]
 # other_roles is a set (no duplicates) that leaves as a sorted list, so the
 # ARRAY column and API responses get a stable order. Requests only accept the
 # fixed choices; responses take whatever is stored so an old value can't 500.
-# Venue isn't a choice: it's a profile type of its own.
+# Venue and Organization aren't choices: each is a profile type of its own. ("Team" stays
+# until teams ship as their own feature.)
 OtherRole = Literal["Coach", "Sponsor", "Team", "Viewer", "Other"]
 _SORTED = PlainSerializer(sorted, return_type=list[str])
 OtherRolesIn = Annotated[set[OtherRole], _SORTED]
@@ -66,6 +68,43 @@ def _clean_handle(value: Any) -> Any:
 # A linked account handle, stored without a leading @ (so "@SamTV" and "SamTV" are the same).
 LinkHandle = Annotated[str, BeforeValidator(_clean_handle), StringConstraints(min_length=1)]
 
+MAX_WEBSITE_LEN = 2048
+
+def _clean_website(value: Any) -> Any:
+    """
+    An org's website. Blank means "none". A bare domain ("example.gg") gets https:// in front;
+    anything else must be an http(s) URL with a real host, so a javascript: link can't get in.
+    """
+
+    if not isinstance(value, str):
+        return value
+
+    value = value.strip()
+
+    if value == "":
+        return None
+
+    if "://" not in value:
+        value = f"https://{value}"
+
+    try:
+        parts = urlsplit(value)
+        host = parts.hostname
+    except ValueError:
+        host = None
+
+    if host is None or "." not in host or parts.scheme.lower() not in ("http", "https"):
+        raise ValueError("Enter a website address like https://example.gg.")
+
+    if len(value) > MAX_WEBSITE_LEN:
+        raise ValueError("That website address is too long.")
+
+    return value
+
+Website = Annotated[str | None, BeforeValidator(_clean_website)]
+# A blank contact email means "none".
+ContactEmail = Annotated[EmailStr | None, BeforeValidator(_blank_to_none)]
+
 # Game account IDs are unique across players, so a blank one is stored as NULL (Postgres
 # allows any number of NULLs in a unique column, but only one "").
 GameAccount = Annotated[str | None, BeforeValidator(_blank_to_none)]
@@ -114,6 +153,18 @@ class HostDetails(StrictIn):
     host_country: NONEMPTYSTR
     event_types: list[str] | None = None
 
+class OrgDetails(StrictIn):
+    """
+    The details of an org profile, sent at sign up or when adding the profile. Its name is the
+    profile's username, so it isn't sent here. `verified` is set by uSync, never by the org.
+    """
+
+    org_country: NONEMPTYSTR
+    games: list[str] | None = None
+    other_games: str | None = None
+    website: Website = None
+    contact_email: ContactEmail = None
+
 class VenueDetails(StrictIn):
     """
     The details of a venue profile: its locations, at least one.
@@ -148,8 +199,12 @@ class VenueProfileIn(ProfileBase):
     type: Literal["venue"]
     details: VenueDetails
 
+class OrgProfileIn(ProfileBase):
+    type: Literal["org"]
+    details: OrgDetails
+
 # `type` picks the model, so a player profile must send player details and so on.
-ProfileIn = Annotated[PlayerProfileIn | HostProfileIn | VenueProfileIn, Field(discriminator="type")]
+ProfileIn = Annotated[PlayerProfileIn | HostProfileIn | VenueProfileIn | OrgProfileIn, Field(discriminator="type")]
 
 class RegistrationOut(BaseModel):
     """
@@ -165,7 +220,7 @@ class RegistrationIn(StrictIn):
     """
 
     default_profile: ProfileType
-    profiles: list[ProfileIn] = Field(min_length=1, max_length=3)
+    profiles: list[ProfileIn] = Field(min_length=1, max_length=4)
 
     @model_validator(mode = "after")
     def check_profiles(self):
@@ -227,6 +282,13 @@ class HostPublic(BaseModel):
 class VenuePublic(BaseModel):
     locations: list[VenueOut] = []
 
+class OrgPublic(BaseModel):
+    organization: str
+    verified: bool = False
+    games: list[str] = []
+    website: str | None = None
+    contact_email: str | None = None
+
 class Profile(BaseModel):
     """
     A public profile page. `others` lists the account's other profiles (from the profiles table
@@ -242,7 +304,7 @@ class Profile(BaseModel):
     other_roles: OtherRolesOut = set()
     other_role_detail: str | None = None
     links: dict[str, str] = {}
-    details: PlayerPublic | HostPublic | VenuePublic
+    details: PlayerPublic | HostPublic | VenuePublic | OrgPublic
     others: list[ProfileSummary] = []
 
 class PlayerSettings(BaseModel):
@@ -269,6 +331,15 @@ class HostSettings(BaseModel):
 class VenueSettings(BaseModel):
     locations: list[VenueOut] = []
 
+class OrgSettings(BaseModel):
+    organization: str
+    verified: bool = False
+    org_country: str
+    games: list[str] = []
+    other_games: str | None = None
+    website: str | None = None
+    contact_email: str | None = None
+
 class ProfileSettingsOut(BaseModel):
     """
     Everything the owner can edit on one of their profiles.
@@ -285,7 +356,7 @@ class ProfileSettingsOut(BaseModel):
     other_roles: OtherRolesOut = set()
     other_role_detail: str | None = None
     links: dict[str, str] = {}
-    details: PlayerSettings | HostSettings | VenueSettings
+    details: PlayerSettings | HostSettings | VenueSettings | OrgSettings
 
 class Updater(StrictIn):
     """
@@ -363,10 +434,26 @@ class VenueUpdate(Updater):
 
     locations: list[VenueIn] | None = Field(default=None, min_length=1)
 
+class OrgUpdate(Updater):
+    """
+    Partial update of an org's details. The name changes with the username
+    (PATCH /me/profiles/org/username), and `verified` can't be changed by the org.
+    """
+
+    never_null: ClassVar[set[str]] = {
+        "org_country"
+    }
+
+    org_country: NONEMPTYSTR | None = None
+    games: list[str] | None = None
+    other_games: str | None = None
+    website: Website = None
+    contact_email: ContactEmail = None
+
 class ProfileUpdate(Updater):
     """
     Partial update of one of the user's profiles. `links`, when sent, replaces the whole set.
-    `details` is checked against the profile's type (PlayerUpdate, HostUpdate or VenueUpdate).
+    `details` is checked against the profile's type (PlayerUpdate, HostUpdate, VenueUpdate or OrgUpdate).
     """
 
     never_null: ClassVar[set[str]] = {
