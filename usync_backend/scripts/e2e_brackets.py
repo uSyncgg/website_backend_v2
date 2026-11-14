@@ -21,7 +21,7 @@ from sqlalchemy import select, delete
 from app.core.db import AsyncSessionLocal, engine
 from app.models.users import UsersParent, Profiles
 from app.models.teams import Teams, TeamMembers, TeamInvites
-from app.models.brackets import Notifications
+from app.models.brackets import Notifications, BracketEvents
 from app.services import brackets as svc
 from app.services import teams as team_svc
 from app.services.notifications import list_notifications
@@ -144,6 +144,8 @@ async def main():
         await expect_http("pending teams can't be seeded", svc.save_draft(host_uid, eid, [ids["Alpha"], ids["Charlie"]], db), 422)
         await expect_http("only the host can seed", svc.save_draft(a_uids[0], eid, [ids["Alpha"], ids["Bravo"]], db), 404)
         await svc.save_draft(host_uid, eid, [ids["Alpha"], ids["Bravo"]], db)
+        anon = await svc.get_event(eid, None, db)
+        check("the public can't see a draft bracket", anon["bracket"] is None)
         ev = await svc.publish(host_uid, eid, db)
         check("published: sign-ups closed, rosters locked", ev["bracket"]["published"] and not ev["registrationOpen"] and ev["rostersLocked"])
         check("both teams got 'match_ready'", len(await notes(db, a_uids[2], "match_ready")) == 1 and len(await notes(db, b_uids[3], "match_ready")) == 1)
@@ -159,6 +161,8 @@ async def main():
         check("a non-captain sees their entrant but can't act", ev["viewerEntrantId"] == ids["Alpha"] and not ev["viewerCanAct"])
         await expect_http("a non-captain can't report", svc.player_report(a_uids[2], eid, "r0m0", MatchScore(score_a = 2, score_b = 1), db), 403)
         await expect_http("tied scores rejected", svc.player_report(a_uids[0], eid, "r0m0", MatchScore(score_a = 1, score_b = 1), db), 422)
+        await expect_http("a Bo3 can't end 3-0", svc.player_report(a_uids[0], eid, "r0m0", MatchScore(score_a = 3, score_b = 0), db), 422)
+        await expect_http("a Bo3 can't end 1-0", svc.player_report(a_uids[0], eid, "r0m0", MatchScore(score_a = 1, score_b = 0), db), 422)
         await expect_http("someone outside the match can't report", svc.player_report(c_uids[0], eid, "r0m0", MatchScore(score_a = 2, score_b = 1), db), 409)
         await svc.player_report(a_uids[0], eid, "r0m0", MatchScore(score_a = 2, score_b = 1), db)
         check("Bravo got 'opponent_reported'", len(await notes(db, b_uids[1], "opponent_reported")) == 1)
@@ -167,6 +171,8 @@ async def main():
         check("the host got 'score_disputed'", len(await notes(db, host_uid, "score_disputed")) == 1)
 
         print("no-show")
+        await expect_http("no-show timer counts from the match's start, not the event's", svc.report_no_show(b_uids[0], eid, "r0m0", db), 409)
+        await backdate_match_start(db, eid, "r0m0", minutes = 15)
         await svc.report_no_show(b_uids[0], eid, "r0m0", db)
         check("Alpha told it was reported as a no-show", any(n["data"].get("against_you") for n in await notes(db, a_uids[0], "no_show_reported")))
         check("the host told about the no-show", len(await notes(db, host_uid, "no_show_reported")) == 1)
@@ -186,6 +192,7 @@ async def main():
         check("hosting list includes it for the host", any(e["id"] == eid for e in await svc.hosting_events(host_uid, db)))
         anon = await svc.get_event(eid, None, db)
         check("anonymous viewers don't see emails", all("email" not in e for e in anon["entrants"]))
+        check("anonymous viewers don't see the payment setup's email", "notifyEmail" not in anon["payments"])
 
         print("1v1 event")
         solo = await svc.create_event(host_uid, EventCreate(
@@ -228,7 +235,7 @@ async def main():
         await expect_http("pending admin can't manage yet", svc.update_event(a_uids[0], oid, EventUpdate(name = "nope"), db), 404)
         invites = await svc.my_admin_invites(a_uids[0], db)
         check("invitee sees the invite", len(invites) == 1 and invites[0]["eventId"] == oid)
-        check("invite notification sent", len(await notes(db, a_uids[0], "admin_invite")) == 1)
+        check("the pending invite is the only bell item (no duplicate notification)", len(await notes(db, a_uids[0], "admin_invite")) == 0)
         await svc.respond_admin_invite(a_uids[0], uuid.UUID(invites[0]["id"]), True, db)
         check("host told the admin joined", len(await notes(db, host_uid, "admin_joined")) == 1)
         as_admin = await svc.get_event(oid, a_uids[0], db)
@@ -236,6 +243,7 @@ async def main():
         check("event on the admin's Hosting list", oid in [e["id"] for e in await svc.hosting_events(a_uids[0], db)])
         renamed = await svc.update_event(a_uids[0], oid, EventUpdate(name = f"E2E renamed {RUN}"), db)
         check("admin can edit the event", renamed["name"] == f"E2E renamed {RUN}")
+        await expect_http("an admin can't sign up to play", svc.register(a_uids[0], oid, Registration(email = "p@example.com"), db), 409)
         await expect_http("admin can't delete the event", svc.delete_event(a_uids[0], oid, db), 404)
         await expect_http("admin can't add admins", svc.invite_admin(a_uids[0], oid, AdminInvite(profile = b_players[0].public_id), db), 404)
         public = await svc.get_event(oid, b_uids[0], db)
@@ -249,6 +257,17 @@ async def main():
         a_admin = (await svc.get_event(oid, host_uid, db))["admins"][0]
         await svc.remove_admin(a_uids[0], oid, uuid.UUID(a_admin["id"]), db)
         await expect_http("admin who stepped down loses access", svc.update_event(a_uids[0], oid, EventUpdate(name = "x"), db), 404)
+
+async def backdate_match_start(db, public_id: str, match_id: str, minutes: int) -> None:
+    """
+    Moves a match's start (when it became playable) back, so its no-show window has passed.
+    """
+
+    event = (await db.execute(select(BracketEvents).where(BracketEvents.public_id == public_id))).scalars().one()
+    ready = dict(event.bracket["readyAt"][match_id])
+    ready["at"] = (datetime.fromisoformat(ready["at"]) - timedelta(minutes = minutes)).isoformat()
+    event.bracket = {**event.bracket, "readyAt": {**event.bracket["readyAt"], match_id: ready}}
+    await db.commit()
 
 async def cleanup():
     async with AsyncSessionLocal() as db:

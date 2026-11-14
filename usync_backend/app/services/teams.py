@@ -1,6 +1,4 @@
 import uuid
-import secrets
-import string
 import unicodedata
 
 from fastapi import HTTPException, UploadFile
@@ -11,6 +9,11 @@ from supabase import AsyncClient
 from openai import AsyncOpenAI
 from app.models.users import Profiles
 from app.models.teams import Teams, TeamMembers, TeamInvites
+from app.models.brackets import BracketEntries
+from app.services.naming import new_public_id, canonical_username, profile_summary, get_own_profile, moderate_name
+from app.services.pictures import process_pfp, remove_pfps, storage_path
+from app.services.brackets import assert_roster_unlocked, sync_team, before_team_deleted, refresh_events
+from app.services.notifications import notify
 from app.schemas.users import (
     ProfileSummary,
     TeamOut,
@@ -25,15 +28,11 @@ from app.schemas.users import (
 # manages it (invites, captains, entering events and paying for entries); players join by
 # accepting an invite to their player profile. Only player profiles can be on a team.
 #
-# Roster changes are checked against bracket events (app.services.brackets, imported inside the
-# functions to avoid a cycle): rosters are locked while a team is in a live bracket, and a change
-# moves the team's sign-ups between pending and signed up.
-#
-# This module mustn't import app.services.users at the top: that module builds an org's teams at
-# sign up from here. The picture helpers are imported inside the functions that use them.
+# Roster changes are checked against bracket events (app.services.brackets): rosters are locked
+# while a team is seeded in a live bracket, and a change moves the team's sign-ups between
+# pending and signed up. Neither brackets nor pictures import this module, so all imports sit
+# at the top.
 
-PUBLIC_ID_ALPHABET = string.ascii_lowercase + string.digits
-PUBLIC_ID_LENGTH = 10
 MAX_TEAMS_PER_OWNER = 50
 SEARCH_LIMIT = 8
 TAKEN_NAME = "You already have a team with that name."
@@ -41,28 +40,15 @@ TAKEN_NAME = "You already have a team with that name."
 def canonical_team_name(name: str) -> str:
     return unicodedata.normalize("NFKC", name).casefold().strip()
 
-def _canonical_username(username: str) -> str:
-    # Same as app.services.users._canonical_username (NFKC, no format chars, casefolded).
-    s = unicodedata.normalize("NFKC", username.strip())
-    return "".join(ch for ch in s if unicodedata.category(ch) != "Cf").casefold()
-
 def new_team(owner_profile_id, name: str, game: str | None, picture: str | None = None) -> Teams:
     return Teams(
         id = uuid.uuid4(),
-        public_id = "".join(secrets.choice(PUBLIC_ID_ALPHABET) for _ in range(PUBLIC_ID_LENGTH)),
+        public_id = new_public_id(),
         owner_profile_id = owner_profile_id,
         name = name.strip(),
         canonical_name = canonical_team_name(name),
         game = game or None,
         picture = picture
-    )
-
-def _summary(profile: Profiles) -> ProfileSummary:
-    return ProfileSummary(
-        type = profile.type,
-        username = profile.username,
-        public_id = profile.public_id,
-        profile_picture = profile.profile_picture
     )
 
 async def _teams_out(teams: list[Teams], db: AsyncSession, viewer_id: str | None = None, include_invites: bool = False) -> list[TeamOut]:
@@ -129,7 +115,7 @@ async def _teams_out(teams: list[Teams], db: AsyncSession, viewer_id: str | None
             game = t.game,
             picture = t.picture,
             created_at = t.created_at,
-            owner = _summary(owners[t.owner_profile_id]),
+            owner = profile_summary(owners[t.owner_profile_id]),
             my_role = "owner" if t.id in owned else my_roles.get(t.id),
             members = members[t.id],
             invites = invites[t.id]
@@ -184,16 +170,6 @@ async def get_team(public_id: str, user_id: str | None, db: AsyncSession) -> Tea
 
     return (await _teams_out([team], db, user_id, include_invites = True))[0]
 
-async def _own_profile(user_id: str, profile_type: str, db: AsyncSession) -> Profiles:
-    profile = (await db.execute(
-        select(Profiles).where(Profiles.account_id == user_id).where(Profiles.type == profile_type)
-    )).scalars().first()
-
-    if not profile:
-        raise HTTPException(status_code=404, detail=f"You don't have {'an org' if profile_type == 'org' else 'a ' + profile_type} profile.")
-
-    return profile
-
 async def _owned_team(user_id: str, team_public_id: str, db: AsyncSession) -> Teams:
     """
     One of the teams the signed in account owns (through any of its profiles), or a 404.
@@ -222,7 +198,7 @@ async def _player_by_public_id(public_id: str, db: AsyncSession) -> Profiles:
 
 async def _player_by_username(username: str, db: AsyncSession) -> Profiles:
     player = (await db.execute(
-        select(Profiles).where(Profiles.type == "player").where(Profiles.canonical_username == _canonical_username(username))
+        select(Profiles).where(Profiles.type == "player").where(Profiles.canonical_username == canonical_username(username))
     )).scalars().first()
 
     if not player:
@@ -252,7 +228,7 @@ async def search_players(query: str, user_id: str, db: AsyncSession) -> list[Pro
     The signed in account's own player profile is left out (you can't invite yourself).
     """
 
-    q = _canonical_username(query)
+    q = canonical_username(query)
 
     if len(q) < 2:
         return []
@@ -267,7 +243,7 @@ async def search_players(query: str, user_id: str, db: AsyncSession) -> list[Pro
         .limit(SEARCH_LIMIT)
     )).scalars().all()
 
-    return [_summary(p) for p in rows]
+    return [profile_summary(p) for p in rows]
 
 async def create_team(
     user_id: str,
@@ -283,9 +259,7 @@ async def create_team(
     and upload with no connection held, then one write (the picture is removed if it fails).
     """
 
-    from app.services.users import process_pfp, _remove_pfps
-
-    owner = await _own_profile(user_id, body.owner_type, db)
+    owner = await get_own_profile(user_id, body.owner_type, db)
     count = len((await db.execute(select(Teams.id).where(Teams.owner_profile_id == owner.id))).all())
 
     if count >= MAX_TEAMS_PER_OWNER:
@@ -307,6 +281,9 @@ async def create_team(
     owner_id = owner.id
     await db.rollback()
 
+    # Team names are public: same word list and moderation as usernames (no connection held).
+    await moderate_name(body.name, openai, "team name")
+
     url, path = (None, None)
 
     if picture is not None:
@@ -323,18 +300,21 @@ async def create_team(
         await db.commit()
     except IntegrityError:
         await db.rollback()
-        await _remove_pfps([path] if path else [], supabase)
+        await remove_pfps([path] if path else [], supabase)
         raise HTTPException(status_code=409, detail=TAKEN_NAME)
     except Exception:
         await db.rollback()
-        await _remove_pfps([path] if path else [], supabase)
+        await remove_pfps([path] if path else [], supabase)
         raise
 
     return await _team_view(user_id, team, db)
 
-async def update_team(user_id: str, team_public_id: str, body: TeamUpdate, db: AsyncSession) -> TeamOut:
+async def update_team(user_id: str, team_public_id: str, body: TeamUpdate, db: AsyncSession, openai: AsyncOpenAI | None = None) -> TeamOut:
     team = await _owned_team(user_id, team_public_id, db)
     values = body.model_dump(exclude_unset=True)
+
+    if values.get("name"):
+        await moderate_name(values["name"], openai, "team name")
 
     if "name" in values:
         values["name"] = values["name"].strip()
@@ -352,7 +332,6 @@ async def update_team(user_id: str, team_public_id: str, body: TeamUpdate, db: A
 
         if "name" in values:
             # Its sign-ups for upcoming events show the new name.
-            from app.services.brackets import sync_team
             await sync_team(team.id, db)
             await db.commit()
 
@@ -366,11 +345,9 @@ async def update_team_picture(
     supabase: AsyncClient,
     openai: AsyncOpenAI
 ) -> TeamOut:
-    from app.services.users import process_pfp, _remove_pfps, _storage_path
-
     team = await _owned_team(user_id, team_public_id, db)
     team_id = team.id
-    old = _storage_path(team.picture) if team.picture else None
+    old = storage_path(team.picture) if team.picture else None
     await db.rollback()
 
     url, path = await process_pfp(picture, supabase, user_id, openai)
@@ -380,21 +357,17 @@ async def update_team_picture(
         await db.commit()
     except Exception:
         await db.rollback()
-        await _remove_pfps([path], supabase)
+        await remove_pfps([path], supabase)
         raise
 
-    await _remove_pfps([old] if old else [], supabase)
+    await remove_pfps([old] if old else [], supabase)
     team = (await db.execute(select(Teams).where(Teams.id == team_id))).scalars().one()
 
     return await _team_view(user_id, team, db)
 
 async def delete_team(user_id: str, team_public_id: str, db: AsyncSession, supabase: AsyncClient) -> None:
-    from app.services.users import _remove_pfps, _storage_path
-
-    from app.services.brackets import before_team_deleted, refresh_events
-
     team = await _owned_team(user_id, team_public_id, db)
-    old = _storage_path(team.picture) if team.picture else None
+    old = storage_path(team.picture) if team.picture else None
 
     # Not while it's in a live bracket; its sign-ups for upcoming events go with it.
     upcoming = await before_team_deleted(team.id, db)
@@ -404,7 +377,7 @@ async def delete_team(user_id: str, team_public_id: str, db: AsyncSession, supab
     await refresh_events(upcoming, db)
     await db.commit()
 
-    await _remove_pfps([old] if old else [], supabase)
+    await remove_pfps([old] if old else [], supabase)
 
 async def invite_player(user_id: str, team_public_id: str, username: str, db: AsyncSession) -> TeamOut:
     """
@@ -468,7 +441,6 @@ async def set_member_role(user_id: str, team_public_id: str, player_public_id: s
     return await _team_view(user_id, team, db)
 
 async def remove_member(user_id: str, team_public_id: str, player_public_id: str, db: AsyncSession) -> TeamOut:
-    from app.services.brackets import assert_roster_unlocked, sync_team
 
     team = await _owned_team(user_id, team_public_id, db)
     player = await _player_by_public_id(player_public_id, db)
@@ -487,7 +459,7 @@ async def leave_team(user_id: str, team_public_id: str, db: AsyncSession) -> Non
     The signed in player leaves a team they're on (the owner deletes it instead).
     """
 
-    player = await _own_profile(user_id, "player", db)
+    player = await get_own_profile(user_id, "player", db)
     team = (await db.execute(select(Teams).where(Teams.public_id == team_public_id))).scalars().first()
 
     if not team:
@@ -496,7 +468,6 @@ async def leave_team(user_id: str, team_public_id: str, db: AsyncSession) -> Non
     if team.owner_profile_id == player.id:
         raise HTTPException(status_code=409, detail="You own this team. Delete it instead.")
 
-    from app.services.brackets import assert_roster_unlocked, sync_team
     await assert_roster_unlocked(team.id, db)
 
     await db.execute(delete(TeamMembers).where(TeamMembers.team_id == team.id).where(TeamMembers.profile_id == player.id))
@@ -541,7 +512,7 @@ async def respond_to_invite(user_id: str, invite_id: uuid.UUID, accept: bool, db
     Accepts (joins the team as a player) or declines one of the signed in player's invites.
     """
 
-    player = await _own_profile(user_id, "player", db)
+    player = await get_own_profile(user_id, "player", db)
 
     invite = (await db.execute(
         select(TeamInvites)
@@ -555,9 +526,6 @@ async def respond_to_invite(user_id: str, invite_id: uuid.UUID, accept: bool, db
         raise HTTPException(status_code=404, detail="Invite not found.")
 
     if accept:
-        from app.services.brackets import assert_roster_unlocked, sync_team
-        from app.services.notifications import notify
-
         await assert_roster_unlocked(invite.team_id, db)
 
     invite.status = "accepted" if accept else "declined"
@@ -588,3 +556,68 @@ async def respond_to_invite(user_id: str, invite_id: uuid.UUID, accept: bool, db
     await db.commit()
 
     return await my_invites(user_id, db)
+
+# ---- when profiles are deleted ---------------------------------------------
+
+async def before_profiles_deleted(profile_ids: set, db: AsyncSession) -> list:
+    """
+    Runs before profiles are deleted (one profile, or every profile on an account).
+
+    - A team the profile owns isn't deleted while it still has other players: ownership passes to
+      a captain, or if there's none, to whoever joined first. A team with nobody else on it is
+      left to cascade away with its owner.
+    - Event sign-ups the profile registered for a team move to the team's (new) owner, so the
+      team keeps its spot instead of the entry cascading away.
+
+    Returns the ids of every team that loses a member, for after_profiles_deleted. The caller
+    deletes the profiles and commits.
+    """
+
+    if not profile_ids:
+        return []
+
+    owned = (await db.execute(select(Teams).where(Teams.owner_profile_id.in_(profile_ids)).with_for_update())).scalars().all()
+
+    for team in owned:
+        successor = (await db.execute(
+            select(TeamMembers)
+            .where(TeamMembers.team_id == team.id)
+            .where(TeamMembers.profile_id.not_in(profile_ids))
+            .order_by((TeamMembers.role == "captain").desc(), TeamMembers.joined_at, TeamMembers.profile_id)
+            .limit(1)
+        )).scalars().first()
+
+        if not successor:
+            continue
+
+        team.owner_profile_id = successor.profile_id
+        successor.role = "captain"
+        new_owner_account = (await db.execute(select(Profiles.account_id).where(Profiles.id == successor.profile_id))).scalar()
+        notify(db, [new_owner_account], "team_ownership", {"team_id": team.public_id, "team_name": team.name})
+
+    await db.flush()
+
+    # Team sign-ups registered by a profile that's going: hand them to the team's owner.
+    entries = (await db.execute(
+        select(BracketEntries, Teams.owner_profile_id)
+        .join(Teams, Teams.id == BracketEntries.team_id)
+        .where(BracketEntries.profile_id.in_(profile_ids))
+        .where(Teams.owner_profile_id.not_in(profile_ids))
+    )).all()
+
+    for entry, owner_profile_id in entries:
+        entry.profile_id = owner_profile_id
+
+    member_of = (await db.execute(
+        select(TeamMembers.team_id).where(TeamMembers.profile_id.in_(profile_ids))
+    )).scalars().all()
+
+    return list(set(member_of))
+
+async def after_profiles_deleted(team_ids: list, db: AsyncSession) -> None:
+    """
+    Updates the event sign-ups of teams that just lost a member (the caller commits).
+    """
+
+    for team_id in team_ids:
+        await sync_team(team_id, db)

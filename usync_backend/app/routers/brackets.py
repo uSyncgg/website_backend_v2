@@ -2,7 +2,8 @@ import uuid
 
 from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.core.dependencies import get_db, verify_supabase_jwt, optional_supabase_jwt
+from openai import AsyncOpenAI
+from app.core.dependencies import get_db, verify_supabase_jwt, optional_supabase_jwt, get_openai
 from app.core.limiter import limiter, MODERATE
 from app.schemas.brackets import EventCreate, EventUpdate, EventDelay, Registration, SeedsUpdate, MatchScore, NotificationsRead, AdminInvite, AdminResponse
 from app.services import brackets as svc
@@ -47,12 +48,12 @@ async def getEvent(event_id: str, claims: dict | None = Depends(optional_supabas
 
 @router.post("")
 @limiter.limit(MODERATE)
-async def createEvent(request: Request, response: Response, body: EventCreate, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
-    return await svc.create_event(claims["sub"], body, db)
+async def createEvent(request: Request, response: Response, body: EventCreate, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db), openai: AsyncOpenAI = Depends(get_openai)):
+    return await svc.create_event(claims["sub"], body, db, openai)
 
 @router.patch("/{event_id}")
-async def updateEvent(event_id: str, body: EventUpdate, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
-    return await svc.update_event(claims["sub"], event_id, body, db)
+async def updateEvent(event_id: str, body: EventUpdate, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db), openai: AsyncOpenAI = Depends(get_openai)):
+    return await svc.update_event(claims["sub"], event_id, body, db, openai)
 
 @router.delete("/{event_id}", status_code = 204)
 async def deleteEvent(event_id: str, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):

@@ -105,8 +105,8 @@ async def getTeam(team_id: str, claims: dict | None = Depends(optional_supabase_
 
 @router.patch("/{team_id}", response_model = TeamOut)
 @limiter.limit(MODERATE)
-async def updateTeam(request: Request, response: Response, team_id: str, body: TeamUpdate, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
-    return await update_team(claims["sub"], team_id, body, db)
+async def updateTeam(request: Request, response: Response, team_id: str, body: TeamUpdate, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db), openai: AsyncOpenAI = Depends(get_openai)):
+    return await update_team(claims["sub"], team_id, body, db, openai)
 
 @router.put("/{team_id}/picture", response_model = TeamOut)
 @limiter.limit(STRICT_ACCOUNT_CHANGE)

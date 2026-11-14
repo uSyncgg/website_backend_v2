@@ -17,7 +17,15 @@ PictureSource = Literal["upload", "copy_default"]
 # Venue and Organization (formerly "Team") aren't choices: each is a profile type of its own.
 OtherRole = Literal["Coach", "Sponsor", "Viewer", "Other"]
 _SORTED = PlainSerializer(sorted, return_type=list[str])
-OtherRolesIn = Annotated[set[OtherRole], _SORTED]
+# "Team" is retired, but the live frontend still offers it until its replacement ships. The
+# backend deploys first, so requests still accept it and it's quietly dropped rather than
+# rejected with a 422. Remove "Team" here once the frontend that never sends it is in production.
+RETIRED_OTHER_ROLES = {"Team"}
+OtherRolesIn = Annotated[
+    set[Literal["Coach", "Sponsor", "Viewer", "Other", "Team"]],
+    AfterValidator(lambda roles: roles - RETIRED_OTHER_ROLES),
+    _SORTED,
+]
 OtherRolesOut = Annotated[set[str], _SORTED]
 
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")

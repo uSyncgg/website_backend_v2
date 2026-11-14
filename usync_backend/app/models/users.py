@@ -141,6 +141,11 @@ class Organizations(Base):
     org_country: Mapped[str] = mapped_column()
     games: Mapped[list[str]] = mapped_column(ARRAY(String), default = [], nullable = True)
     other_games: Mapped[str | None] = mapped_column(nullable = True)
+    # Added by migration f8d2b6c41a07 (shipped on main with the org profile fix). `verified` is
+    # set by uSync, never by the org.
+    verified: Mapped[bool] = mapped_column(default = False, server_default = text("false"))
+    website: Mapped[str | None] = mapped_column(nullable = True)
+    contact_email: Mapped[str | None] = mapped_column(nullable = True)
 
 class Venues(Base):
     """
