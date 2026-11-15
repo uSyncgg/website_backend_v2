@@ -181,6 +181,7 @@ class EventOut(Out):
     gameMode: str | None
     gameModeKey: str | None
     format: str
+    formatLabel: str
     teamSize: str
     bestOf: int
     finalBestOf: int | None
@@ -220,9 +221,11 @@ class EventSummary(Out):
     game: str
     gameTitle: str
     format: str
+    formatLabel: str
     teamSize: str
     startsAt: str
     stage: str
+    hostProfile: str | None
     maxEntrants: int | None
     signedUp: int
     pending: int

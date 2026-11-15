@@ -11,7 +11,7 @@ from app.models.teams import Teams, TeamMembers, TeamGames
 from app.models.games import Games, GameTitles, GameModes
 from app.models.brackets import (
     BracketEvents, BracketEntries, BracketEntryPlayers, BracketEventAdmins, Brackets, BracketSeeds,
-    BracketMatches, MatchReports, MatchDecisions, EventIssues,
+    BracketMatches, BracketFormats, MatchReports, MatchDecisions, EventIssues,
 )
 from app.schemas.brackets import EventCreate, EventUpdate, EventDelay, Registration, AdminInvite
 from app.services import bracket_engine as engine
@@ -203,6 +203,7 @@ async def _event_out(event: BracketEvents, user_id: str | None, db: AsyncSession
         }
 
     game = await db.get(Games, event.game_id)
+    fmt = await lookups.bracket_format(event.format, db)
     title = await db.get(GameTitles, event.game_title_id) if event.game_title_id else None
     mode = await db.get(GameModes, event.game_mode_id) if event.game_mode_id else None
     host = registrants[event.host_profile_id]
@@ -217,6 +218,7 @@ async def _event_out(event: BracketEvents, user_id: str | None, db: AsyncSession
         "gameMode": mode.name if mode else None,
         "gameModeKey": mode.key if mode else None,
         "format": event.format,
+        "formatLabel": fmt.label,
         "teamSize": f"{event.team_size}v{event.team_size}",
         "bestOf": event.best_of,
         "finalBestOf": event.final_best_of,
@@ -297,6 +299,7 @@ async def _summaries(events: list[BracketEvents], user_id: str | None, db: Async
         return []
     ids = [e.id for e in events]
     games = dict((await db.execute(select(Games.id, Games.name))).all())
+    format_labels = dict((await db.execute(select(BracketFormats.key, BracketFormats.label))).all())
     title_ids = {e.game_title_id for e in events} - {None}
     titles = dict((await db.execute(select(GameTitles.id, GameTitles.name).where(GameTitles.id.in_(title_ids)))).all()) if title_ids else {}
     counts: dict = {}
@@ -310,6 +313,7 @@ async def _summaries(events: list[BracketEvents], user_id: str | None, db: Async
     admin_of = await access.admin_event_ids(user_id, db)
     roles = await access.my_team_roles(user_id, db)
     open_counts = await issues.open_counts(ids, db)
+    hosts = dict((await db.execute(select(Profiles.id, Profiles.public_id).where(Profiles.id.in_({e.host_profile_id for e in events})))).all())
 
     out = []
     for event in events:
@@ -342,9 +346,11 @@ async def _summaries(events: list[BracketEvents], user_id: str | None, db: Async
             "game": games.get(event.game_id, ""),
             "gameTitle": titles.get(event.game_title_id, ""),
             "format": event.format,
+            "formatLabel": format_labels.get(event.format, event.format),
             "teamSize": f"{event.team_size}v{event.team_size}",
             "startsAt": _iso(event.starts_at),
             "stage": _stage(event, bracket),
+            "hostProfile": hosts.get(event.host_profile_id),
             "maxEntrants": event.max_entrants,
             "signedUp": counts.get(event.id, {}).get("signed_up", 0),
             "pending": counts.get(event.id, {}).get("pending", 0),
