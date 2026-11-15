@@ -7,7 +7,7 @@ from sqlalchemy import ForeignKey, ForeignKeyConstraint, String, DateTime, text,
 from sqlalchemy.dialects.postgresql import ARRAY, ENUM, ExcludeConstraint
 
 # The enum types are created by the migration, so the models never try to create them.
-PROFILE_TYPE = ENUM("player", "host", "venue", name = "profile_type", create_type = False)
+PROFILE_TYPE = ENUM("player", "host", "venue", "org", name = "profile_type", create_type = False)
 LINK_PLATFORM = ENUM(
     "twitch", "twitter", "youtube", "kick", "discord", "instagram",
     "cmg", "gankster", "faceit", "battlefy",
@@ -127,6 +127,20 @@ class Hosts(Base):
     organization: Mapped[str] = mapped_column()
     host_country: Mapped[str] = mapped_column()
     event_types: Mapped[list[str]] = mapped_column(ARRAY(String), default = [], nullable = True)
+
+class Organizations(Base):
+    """
+    SQL Alchemy model describing the organizations table: the details of an org profile. An org
+    runs teams (app.models.teams) and enters them in events, but doesn't post events itself.
+    """
+
+    __tablename__ = "organizations"
+
+    profile_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("profiles.id", ondelete = "CASCADE"), primary_key = True)
+    organization: Mapped[str] = mapped_column()
+    org_country: Mapped[str] = mapped_column()
+    games: Mapped[list[str]] = mapped_column(ARRAY(String), default = [], nullable = True)
+    other_games: Mapped[str | None] = mapped_column(nullable = True)
 
 class Venues(Base):
     """

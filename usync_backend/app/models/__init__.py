@@ -14,8 +14,12 @@ from app.models.users import (
     LanStatistics, 
     SiteStatistics, 
     TournamentStatistics,
-    Venues
+    Venues,
+    Organizations
 )
+from app.models.teams import Teams, TeamMembers, TeamInvites
+from app.models.brackets import BracketEvents, BracketEntries, Notifications
+from app.models.chat import MatchChatRooms, MatchChatMessages, MatchChatAdmins, ChatReports
 from app.models.host_data import EventFormParent, LanEvents, LeagueEvents, XpEvents, WagerEvents
 from app.models.event_registration import PassPools, EventPassTiers, EventRegistrations
 from app.models.event_claims import EventClaims
