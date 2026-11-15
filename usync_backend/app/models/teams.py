@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 from app.models.base import Base
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy import CheckConstraint, ForeignKey, DateTime, Index, UniqueConstraint, text
+from sqlalchemy import CheckConstraint, ForeignKey, DateTime, Index, SmallInteger, UniqueConstraint, text
 
 class Teams(Base):
     """
@@ -28,6 +28,17 @@ class Teams(Base):
         UniqueConstraint("owner_profile_id", "canonical_name", name = "uq_teams_owner_canonical_name"),
     )
 
+class TeamGames(Base):
+    """
+    SQL Alchemy model describing the team_games table: the games a team plays (at least one,
+    enforced by the API). A team can enter events for any of its games.
+    """
+
+    __tablename__ = "team_games"
+
+    team_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("teams.id", ondelete = "CASCADE"), primary_key = True)
+    game_id: Mapped[int] = mapped_column(SmallInteger, ForeignKey("games.id", ondelete = "RESTRICT"), primary_key = True, index = True)
+
 class TeamMembers(Base):
     """
     SQL Alchemy model describing the team_members table: the player profiles on a team. A
@@ -48,7 +59,8 @@ class TeamMembers(Base):
 class TeamInvites(Base):
     """
     SQL Alchemy model describing the team_invites table: a team's owner inviting a player profile
-    onto the team. Only one pending invite per player per team.
+    onto the team. Only one pending invite per player per team. status: 'pending', 'accepted',
+    'declined', or 'cancelled' (the owner withdrew it).
     """
 
     __tablename__ = "team_invites"
@@ -56,8 +68,12 @@ class TeamInvites(Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
     team_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("teams.id", ondelete = "CASCADE"), index = True)
     profile_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("profiles.id", ondelete = "CASCADE"), index = True)
+    # Who sent it (the team's owner profile at the time); null if that profile is later deleted.
+    invited_by_profile_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("profiles.id", ondelete = "SET NULL"), nullable = True)
     status: Mapped[str] = mapped_column(default = "pending", server_default = text("'pending'"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = text("now()"))
+    # When it was accepted, declined or cancelled. Non-pending invites are deleted 90 days after this.
+    responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone = True), nullable = True)
 
     __table_args__ = (
         CheckConstraint("status IN ('pending', 'accepted', 'declined', 'cancelled')", name = "ck_team_invites_status"),

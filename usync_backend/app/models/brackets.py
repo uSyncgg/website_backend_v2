@@ -4,7 +4,26 @@ from datetime import datetime
 from app.models.base import Base
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy import CheckConstraint, ForeignKey, DateTime, Index, UniqueConstraint, text
+from sqlalchemy import CheckConstraint, ForeignKey, DateTime, Index, SmallInteger, UniqueConstraint, text
+
+class BracketFormats(Base):
+    """
+    SQL Alchemy model describing the bracket_formats table: the formats an event can use, as
+    configuration (label, blurb, whether there's a single deciding final, the smallest field it
+    can run with). How a format pairs entrants is code - one builder per key in
+    app.services.bracket_engine - so adding a format is one row here plus one function there.
+    Maintained by migrations only.
+    """
+
+    __tablename__ = "bracket_formats"
+
+    key: Mapped[str] = mapped_column(primary_key = True)
+    label: Mapped[str] = mapped_column()
+    description: Mapped[str] = mapped_column()
+    has_final: Mapped[bool] = mapped_column()
+    min_entrants: Mapped[int] = mapped_column(SmallInteger, default = 2, server_default = "2")
+    enabled: Mapped[bool] = mapped_column(default = True, server_default = text("true"))
+    sort_order: Mapped[int] = mapped_column(SmallInteger, default = 0, server_default = "0")
 
 class BracketEvents(Base):
     """
@@ -25,7 +44,12 @@ class BracketEvents(Base):
     event_type: Mapped[str] = mapped_column()
     game: Mapped[str] = mapped_column()
     game_title: Mapped[str] = mapped_column(default = "", server_default = text("''"))
-    format: Mapped[str] = mapped_column()
+    # The lookup-table versions of game / game_title (the strings above are kept until the
+    # services move over, then dropped). The mode is optional; a title only exists for some games.
+    game_id: Mapped[int | None] = mapped_column(SmallInteger, ForeignKey("games.id", ondelete = "RESTRICT"), nullable = True, index = True)
+    game_title_id: Mapped[int | None] = mapped_column(ForeignKey("game_titles.id", ondelete = "RESTRICT"), nullable = True)
+    game_mode_id: Mapped[int | None] = mapped_column(ForeignKey("game_modes.id", ondelete = "RESTRICT"), nullable = True)
+    format: Mapped[str] = mapped_column(ForeignKey("bracket_formats.key", ondelete = "RESTRICT"))
     team_size: Mapped[int] = mapped_column()
     best_of: Mapped[int] = mapped_column()
     final_best_of: Mapped[int | None] = mapped_column(nullable = True)
@@ -51,7 +75,6 @@ class BracketEvents(Base):
     __table_args__ = (
         UniqueConstraint("public_id", name = "uq_bracket_events_public_id"),
         CheckConstraint("event_type IN ('league', 'lan', 'tournament')", name = "ck_bracket_events_type"),
-        CheckConstraint("format IN ('single_elim', 'double_elim', 'round_robin', 'swiss')", name = "ck_bracket_events_format"),
         CheckConstraint("platform IN ('pc_allowed', 'console_only')", name = "ck_bracket_events_platform"),
         CheckConstraint("team_size BETWEEN 1 AND 10", name = "ck_bracket_events_team_size"),
     )
@@ -61,17 +84,21 @@ class BracketEntries(Base):
     SQL Alchemy model describing the bracket_entries table: one entrant in an event, either a
     player on their own (1v1) or a team.
 
-    status is 'signed_up' or 'pending'. A team is pending while its roster is smaller than the
-    event's team size, or while the event is full; pending entries don't take a spot and aren't
-    seeded. `roster` is the team's usernames, kept in step with the team until the bracket is
-    published, when rosters freeze.
+    status is 'signed_up' or 'pending'. A team is pending until its captain has picked the
+    event's team size in players (bracket_entry_players), or while the event is full; pending
+    entries don't take a spot and aren't seeded.
+
+    profile_id is the solo player, or for a team the profile that registered it. It's nulled (not
+    cascaded) when that profile is deleted, so the entry - and any bracket it's in - survives.
+    `roster` (copied usernames) is superseded by bracket_entry_players and dropped once the
+    services move over.
     """
 
     __tablename__ = "bracket_entries"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
     event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_events.id", ondelete = "CASCADE"), index = True)
-    profile_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("profiles.id", ondelete = "CASCADE"), index = True)
+    profile_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("profiles.id", ondelete = "SET NULL"), nullable = True, index = True)
     team_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("teams.id", ondelete = "SET NULL"), nullable = True, index = True)
     name: Mapped[str] = mapped_column()
     status: Mapped[str] = mapped_column(default = "signed_up", server_default = text("'signed_up'"))
@@ -86,6 +113,248 @@ class BracketEntries(Base):
         CheckConstraint("status IN ('signed_up', 'pending')", name = "ck_bracket_entries_status"),
         Index("uq_bracket_entries_team", "event_id", "team_id", unique = True, postgresql_where = text("team_id IS NOT NULL")),
         Index("uq_bracket_entries_solo", "event_id", "profile_id", unique = True, postgresql_where = text("team_id IS NULL")),
+    )
+
+class BracketEntryPlayers(Base):
+    """
+    SQL Alchemy model describing the bracket_entry_players table: who plays for an entry in one
+    event. For a team, the players its captain picked (team members when picked; checked by the
+    API, not a foreign key, so a player leaving the team later doesn't rewrite the event's
+    history). For a solo entry, the player themself.
+
+    One row per player per event, whichever entry: a player can't play for two entrants in the
+    same event. The captain can change the picks until the bracket is published; after that the
+    event's roster is locked (the team itself never freezes).
+    """
+
+    __tablename__ = "bracket_entry_players"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
+    event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_events.id", ondelete = "CASCADE"))
+    entry_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_entries.id", ondelete = "CASCADE"), index = True)
+    team_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("teams.id", ondelete = "SET NULL"), nullable = True)
+    profile_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("profiles.id", ondelete = "SET NULL"), nullable = True, index = True)
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = text("now()"))
+
+    __table_args__ = (
+        UniqueConstraint("event_id", "profile_id", name = "uq_bracket_entry_players_event_profile"),
+    )
+
+class Brackets(Base):
+    """
+    SQL Alchemy model describing the brackets table: an event's bracket. One per event; reseeding
+    a draft replaces it (its seeds and matches go with it).
+
+    status: 'draft' (only the host and admins see it) -> 'published' (live: matches are played and
+    the entrants' event rosters are locked) -> 'complete' (every match decided).
+    """
+
+    __tablename__ = "brackets"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
+    event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_events.id", ondelete = "CASCADE"), unique = True)
+    format: Mapped[str] = mapped_column(ForeignKey("bracket_formats.key", ondelete = "RESTRICT"))
+    status: Mapped[str] = mapped_column(default = "draft", server_default = text("'draft'"))
+    created_by_profile_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("profiles.id", ondelete = "SET NULL"), nullable = True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = text("now()"))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone = True), nullable = True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone = True), nullable = True)
+
+    __table_args__ = (
+        CheckConstraint("status IN ('draft', 'published', 'complete')", name = "ck_brackets_status"),
+    )
+
+class BracketSeeds(Base):
+    """
+    SQL Alchemy model describing the bracket_seeds table: each entrant's seed in a bracket (1 = top).
+    """
+
+    __tablename__ = "bracket_seeds"
+
+    bracket_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("brackets.id", ondelete = "CASCADE"), primary_key = True)
+    entry_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_entries.id", ondelete = "CASCADE"), primary_key = True)
+    seed: Mapped[int] = mapped_column(SmallInteger)
+
+    __table_args__ = (
+        UniqueConstraint("bracket_id", "seed", name = "uq_bracket_seeds_bracket_seed"),
+        CheckConstraint("seed >= 1", name = "ck_bracket_seeds_seed"),
+    )
+
+class BracketMatches(Base):
+    """
+    SQL Alchemy model describing the bracket_matches table: one row per match, created when the
+    bracket is published (elimination formats: every match up front, later ones waiting on
+    earlier results; round robin: every round; swiss: each round once the one before is played).
+
+    - code: the match's stable, readable id in its bracket ("r0m0", "l1m2", "gf1", "sw2m3"),
+      used in URLs and notifications.
+    - stage: 'main' (single elim, round robin, swiss), 'winners' / 'losers' / 'grand' (double elim).
+    - entry_a_id / entry_b_id: null until an earlier match decides who plays (status 'pending'),
+      or for a bye (status 'bye').
+    - score_a / score_b: games won by side A and side B, two integers rather than a "2:1" string
+      so the database can check them and the API can validate best of without parsing.
+    - next_match_id / next_slot: where the winner goes; loser_next_match_id / loser_next_slot:
+      where the loser goes (double elim's losers bracket). Both are null when there's nowhere to
+      go - a final, or any match in single elim (loser) / round robin / swiss (both).
+    - status: 'pending' (waiting on earlier matches), 'ready' (both sides known, play it),
+      'complete', 'bye' (one side advances unplayed), 'empty' (bye vs bye in a sparse bracket).
+      Reports, disputes and no-shows are their own tables; locked = the result above can't be
+      reported while a post-advancement dispute on the match that fed it is open.
+    - ready_at: when both sides became known - the match's start, which the no-show timer
+      counts from. completed_at: when it was decided - the 5 minute dispute window counts from it.
+    """
+
+    __tablename__ = "bracket_matches"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
+    bracket_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("brackets.id", ondelete = "CASCADE"), index = True)
+    code: Mapped[str] = mapped_column()
+    stage: Mapped[str] = mapped_column(default = "main", server_default = text("'main'"))
+    round: Mapped[int] = mapped_column(SmallInteger)
+    slot: Mapped[int] = mapped_column(SmallInteger)
+    best_of: Mapped[int] = mapped_column(SmallInteger)
+    entry_a_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("bracket_entries.id", ondelete = "SET NULL"), nullable = True, index = True)
+    entry_b_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("bracket_entries.id", ondelete = "SET NULL"), nullable = True, index = True)
+    status: Mapped[str] = mapped_column(default = "pending", server_default = text("'pending'"))
+    score_a: Mapped[int | None] = mapped_column(SmallInteger, nullable = True)
+    score_b: Mapped[int | None] = mapped_column(SmallInteger, nullable = True)
+    winner_entry_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("bracket_entries.id", ondelete = "SET NULL"), nullable = True)
+    forfeit: Mapped[bool] = mapped_column(default = False, server_default = text("false"))
+    locked: Mapped[bool] = mapped_column(default = False, server_default = text("false"))
+    next_match_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("bracket_matches.id", ondelete = "SET NULL"), nullable = True)
+    next_slot: Mapped[str | None] = mapped_column(nullable = True)
+    loser_next_match_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("bracket_matches.id", ondelete = "SET NULL"), nullable = True)
+    loser_next_slot: Mapped[str | None] = mapped_column(nullable = True)
+    ready_at: Mapped[datetime | None] = mapped_column(DateTime(timezone = True), nullable = True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone = True), nullable = True)
+
+    __table_args__ = (
+        UniqueConstraint("bracket_id", "code", name = "uq_bracket_matches_bracket_code"),
+        CheckConstraint("stage IN ('main', 'winners', 'losers', 'grand')", name = "ck_bracket_matches_stage"),
+        CheckConstraint("status IN ('pending', 'ready', 'complete', 'bye', 'empty')", name = "ck_bracket_matches_status"),
+        # A link to the next match always says which side of it ('a' or 'b') this match's winner /
+        # loser fills, and a side is never given without a match.
+        CheckConstraint("(next_match_id IS NULL) = (next_slot IS NULL) AND (next_slot IS NULL OR next_slot IN ('a', 'b'))", name = "ck_bracket_matches_next_slot"),
+        CheckConstraint("(loser_next_match_id IS NULL) = (loser_next_slot IS NULL) AND (loser_next_slot IS NULL OR loser_next_slot IN ('a', 'b'))", name = "ck_bracket_matches_loser_next_slot"),
+        CheckConstraint("score_a >= 0 AND score_b >= 0", name = "ck_bracket_matches_scores"),
+        CheckConstraint("best_of BETWEEN 1 AND 9 AND best_of % 2 = 1", name = "ck_bracket_matches_best_of"),
+    )
+
+class MatchReports(Base):
+    """
+    SQL Alchemy model describing the match_reports table: a side's report of a match's score.
+    One per side per match; clearing a match deletes its reports so both sides can report again.
+    Two reports with the same winner decide the match; different winners open a dispute.
+    """
+
+    __tablename__ = "match_reports"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
+    match_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_matches.id", ondelete = "CASCADE"))
+    entry_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_entries.id", ondelete = "CASCADE"))
+    reported_by_profile_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("profiles.id", ondelete = "SET NULL"), nullable = True)
+    score_a: Mapped[int] = mapped_column(SmallInteger)
+    score_b: Mapped[int] = mapped_column(SmallInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = text("now()"))
+
+    __table_args__ = (
+        UniqueConstraint("match_id", "entry_id", name = "uq_match_reports_match_entry"),
+        CheckConstraint("score_a >= 0 AND score_b >= 0 AND score_a <> score_b", name = "ck_match_reports_scores"),
+    )
+
+class MatchDecisions(Base):
+    """
+    SQL Alchemy model describing the match_decisions table: every host or admin ruling on a match,
+    for the audit trail and so a ruling can be reverted. prev_* is the match's result just before
+    the ruling and new_* just after - e.g. awarding Bravo a 2-1 win over a disputed match records
+    prev (ready, no scores, no winner) and new (complete, 2-1, Bravo). Reverting puts prev_* back.
+
+    action: 'award' (set the result), 'forfeit' (award after a no-show), 'clear' (reset the match
+    so it's played or reported again), 'uphold' (a post-advancement dispute was wrong: unlock),
+    'revert' (undo an earlier decision; reverts_decision_id points at it).
+    """
+
+    __tablename__ = "match_decisions"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
+    match_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_matches.id", ondelete = "CASCADE"), index = True)
+    decided_by_profile_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("profiles.id", ondelete = "SET NULL"), nullable = True)
+    action: Mapped[str] = mapped_column()
+    issue_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("event_issues.id", ondelete = "SET NULL"), nullable = True)
+    reverts_decision_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("match_decisions.id", ondelete = "SET NULL"), nullable = True)
+    prev_status: Mapped[str] = mapped_column()
+    prev_score_a: Mapped[int | None] = mapped_column(SmallInteger, nullable = True)
+    prev_score_b: Mapped[int | None] = mapped_column(SmallInteger, nullable = True)
+    prev_winner_entry_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("bracket_entries.id", ondelete = "SET NULL"), nullable = True)
+    new_status: Mapped[str] = mapped_column()
+    new_score_a: Mapped[int | None] = mapped_column(SmallInteger, nullable = True)
+    new_score_b: Mapped[int | None] = mapped_column(SmallInteger, nullable = True)
+    new_winner_entry_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("bracket_entries.id", ondelete = "SET NULL"), nullable = True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = text("now()"))
+
+    __table_args__ = (
+        CheckConstraint("action IN ('award', 'forfeit', 'clear', 'uphold', 'revert')", name = "ck_match_decisions_action"),
+    )
+
+class EventIssues(Base):
+    """
+    SQL Alchemy model describing the event_issues table: the per-event admin queue. Anything that
+    needs the host or an admin to step in - a disputed score, a one-sided report left 5 minutes,
+    a no-show, a post-advancement dispute - is a row here, and the host and admins are notified.
+    Only they can see an event's queue. Oldest first.
+
+    status: 'open' (in the queue) -> 'claimed' (someone pressed "go to issue"; shown as claimed
+    and back to 'open' if not closed within 10 minutes) -> 'dismissed' or 'resolved'. Closing
+    always beats claiming: a claim only applies to an open issue, a dismissal to an open or
+    claimed one, each as one atomic UPDATE, so two admins can't both win. An issue whose match
+    has since been decided is resolved automatically (closed_by is null for the system).
+
+    raised_by_entry_id: the side that raised it (null for ones the system raises). A side can
+    raise one post-advancement dispute per match (partial unique index below).
+    """
+
+    __tablename__ = "event_issues"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
+    event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_events.id", ondelete = "CASCADE"))
+    match_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("bracket_matches.id", ondelete = "CASCADE"), nullable = True, index = True)
+    type: Mapped[str] = mapped_column()
+    raised_by_entry_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("bracket_entries.id", ondelete = "SET NULL"), nullable = True)
+    data: Mapped[dict] = mapped_column(JSONB, default = dict, server_default = text("'{}'::jsonb"))
+    status: Mapped[str] = mapped_column(default = "open", server_default = text("'open'"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = text("now()"))
+    claimed_by_profile_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("profiles.id", ondelete = "SET NULL"), nullable = True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone = True), nullable = True)
+    closed_by_profile_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("profiles.id", ondelete = "SET NULL"), nullable = True)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone = True), nullable = True)
+
+    __table_args__ = (
+        CheckConstraint("type IN ('dispute', 'one_sided_report', 'no_show', 'post_advancement_dispute')", name = "ck_event_issues_type"),
+        CheckConstraint("status IN ('open', 'claimed', 'dismissed', 'resolved')", name = "ck_event_issues_status"),
+        Index("ix_event_issues_queue", "event_id", "status", "created_at"),
+        Index("uq_event_issues_one_dispute_per_side", "match_id", "raised_by_entry_id", unique = True,
+              postgresql_where = text("type = 'post_advancement_dispute'")),
+        Index("uq_event_issues_open_per_match_type", "match_id", "type", unique = True,
+              postgresql_where = text("status IN ('open', 'claimed') AND type <> 'post_advancement_dispute'")),
+    )
+
+class EventIssueActions(Base):
+    """
+    SQL Alchemy model describing the event_issue_actions table: who did what to a queue item and
+    when ('claim', 'release' - the 10 minutes ran out, 'dismiss', 'resolve', 'auto_resolve').
+    profile_id is null for the system.
+    """
+
+    __tablename__ = "event_issue_actions"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
+    issue_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("event_issues.id", ondelete = "CASCADE"), index = True)
+    profile_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("profiles.id", ondelete = "SET NULL"), nullable = True)
+    action: Mapped[str] = mapped_column()
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = text("now()"))
+
+    __table_args__ = (
+        CheckConstraint("action IN ('claim', 'release', 'dismiss', 'resolve', 'auto_resolve')", name = "ck_event_issue_actions_action"),
     )
 
 class BracketEventAdmins(Base):
@@ -122,6 +391,8 @@ class Notifications(Base):
     type: Mapped[str] = mapped_column()
     data: Mapped[dict] = mapped_column(JSONB, default = dict, server_default = text("'{}'::jsonb"))
     read: Mapped[bool] = mapped_column(default = False, server_default = text("false"))
+    # When it was read (or dismissed). Read notifications are deleted 90 days after this.
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone = True), nullable = True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = text("now()"))
 
     __table_args__ = (
