@@ -18,9 +18,10 @@ from app.services.notifications import notify
 # Playing the bracket: reports, no-shows, disputes and the host's / admins' rulings.
 #
 # Reporting:
-# - Both sides report the same score: the match is decided and the winner advances.
-# - Both report and disagree: it's disputed - both sides' players are told, and it goes in the
-#   admin queue. Neither side can report again until the host or an admin rules.
+# - Both sides report the same winner: the match is decided and the winner advances. If the two
+#   scores differ, the first report's score is the one recorded (both name the same winner).
+# - Both report and name different winners: it's disputed - both sides' players are told, and it
+#   goes in the admin queue. Neither side can report again until the host or an admin rules.
 # - One side reports and the other doesn't within 5 minutes: the background sweeper puts a
 #   one-sided report in the queue. The other side can still report; agreeing decides the match
 #   (and closes the queue item), disagreeing makes it a dispute.
@@ -147,8 +148,8 @@ async def report(user_id: str, public_id: str, code: str, body: MatchScore, db: 
     sides = await _sides(db, match)
     data = {"event_id": event.public_id, "event_name": event.name, "match_id": match.code}
 
-    if theirs and (theirs.score_a, theirs.score_b) == (body.score_a, body.score_b):
-        _set_result(match, body.score_a, body.score_b, forfeit = False, ruled = False)
+    if theirs and (theirs.score_a > theirs.score_b) == (body.score_a > body.score_b):
+        _set_result(match, theirs.score_a, theirs.score_b, forfeit = False, ruled = False)
         await issues.resolve_for_match(db, match, None, ("one_sided_report",))
         await _settle(db, event, bracket, rows)
     elif theirs:
@@ -157,7 +158,7 @@ async def report(user_id: str, public_id: str, code: str, body: MatchScore, db: 
             notify(db, players.get(side, ()), "score_disputed", {**data, "opponent": sides[other].name})
         await issues.resolve_for_match(db, match, None, ("one_sided_report",))
         await issues.open_issue(db, event, match, "dispute", None, {
-            "summary": f"{sides[match.entry_a_id].name} vs {sides[match.entry_b_id].name}: the two reports disagree.",
+            "summary": f"{sides[match.entry_a_id].name} vs {sides[match.entry_b_id].name}: each side says it won.",
             "reports": {
                 str(e): {"scoreA": r.score_a, "scoreB": r.score_b}
                 for e, r in ((me.id, mine), (opponent_id, theirs))
