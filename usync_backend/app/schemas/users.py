@@ -131,7 +131,8 @@ class TeamIn(StrictIn):
     """
 
     name: TEAM_NAME
-    game: str | None = None
+    # Game keys (GET /brackets/meta): every team plays at least one game.
+    games: list[NONEMPTYSTR] = Field(min_length=1, max_length=10)
 
 class OrgDetails(StrictIn):
     """
@@ -288,6 +289,10 @@ class TeamInviteOut(BaseModel):
     profile_picture: str | None = None
     created_at: datetime
 
+class GameRef(BaseModel):
+    key: str
+    name: str
+
 class TeamOut(BaseModel):
     """
     A team. `owner` is the profile that runs it (an org, or the player who made it).
@@ -297,7 +302,7 @@ class TeamOut(BaseModel):
 
     public_id: str
     name: str
-    game: str | None = None
+    games: list[GameRef] = []
     picture: str | None = None
     created_at: datetime
     owner: "ProfileSummary"
@@ -510,13 +515,13 @@ class TeamCreate(TeamIn):
 
 class TeamUpdate(Updater):
     """
-    PATCH /teams/{team_public_id}. A null game clears it.
+    PATCH /teams/{team_public_id}. `games` replaces the team's games (at least one).
     """
 
-    never_null: ClassVar[set[str]] = {"name"}
+    never_null: ClassVar[set[str]] = {"name", "games"}
 
     name: TEAM_NAME | None = None
-    game: str | None = None
+    games: list[NONEMPTYSTR] | None = Field(default=None, min_length=1, max_length=10)
 
 class TeamInviteCreate(StrictIn):
     """

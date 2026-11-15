@@ -40,7 +40,7 @@ from app.services.naming import (
 )
 from app.services.event_claims import PROOF_BUCKET
 from app.models.teams import Teams
-from app.services.teams import new_team, org_teams, before_profiles_deleted, after_profiles_deleted
+from app.services.teams import new_team, team_game_rows, game_ids_for, org_teams, before_profiles_deleted, after_profiles_deleted
 from supabase import AsyncClient
 from supabase_auth.errors import AuthApiError
 from openai import AsyncOpenAI
@@ -110,10 +110,11 @@ def _raise_conflict(e: IntegrityError, action: str, profile_type: str | None = N
 def _canonical_handle(handle: str) -> str:
     return unicodedata.normalize("NFKC", handle).casefold()
 
-def _build_profile(profile: ProfileIn, account_id: str, pfp_url: str | None) -> tuple[Profiles, list[ProfileLinks | Players | Hosts | Venues | Organizations | Teams]]:
+def _build_profile(profile: ProfileIn, account_id: str, pfp_url: str | None, game_ids: dict | None = None) -> tuple[Profiles, list]:
     """
-    Builds a profiles row and the rows that hang off it (links and the type's details). The
-    profile's id is set here so the child rows can point at it before anything is flushed.
+    Builds a profiles row and the rows that hang off it (links and the type's details, and an
+    org's teams with their games). The profile's id is set here so the child rows can point at
+    it before anything is flushed. `game_ids` maps game keys to lookup ids (see _game_ids).
     """
 
     row = Profiles(
@@ -178,7 +179,10 @@ def _build_profile(profile: ProfileIn, account_id: str, pfp_url: str | None) -> 
             other_games = details.other_games
         ))
         # Teams picked at sign up (optional). More can be added later from the profile.
-        children.extend(new_team(row.id, team.name, team.game) for team in details.teams)
+        for team_in in details.teams:
+            team = new_team(row.id, team_in.name)
+            children.append(team)
+            children.extend(team_game_rows(team, [game_ids[k] for k in team_in.games]))
     else:
         # Keyed by name since (profile_id, venue_name) is the primary key.
         unique_locations = {v.name: v.location for v in details.locations}
@@ -281,6 +285,14 @@ async def validate_username(username: str, openai: AsyncOpenAI, loc: tuple, prof
 
     return None
 
+async def _game_ids(profiles: list, db: AsyncSession) -> dict:
+    """
+    {game key: lookup id} for every game the org teams in these profiles play (422 if unknown).
+    """
+
+    keys = sorted({k for p in profiles for t in (getattr(getattr(p, "details", None), "teams", None) or []) for k in t.games})
+    return dict(zip(keys, await game_ids_for(keys, db))) if keys else {}
+
 async def _moderate_team_names(profile: ProfileIn, openai: AsyncOpenAI) -> None:
     """
     An org can name its teams at sign up; those names get the same moderation as any team name.
@@ -344,6 +356,8 @@ async def handle_registration(
     for i, profile in enumerate(payload.profiles):
         await check_username_available(profile.username, profile.type, db, ("body", "profiles", i, "username"))
 
+    game_ids = await _game_ids(payload.profiles, db)
+
     # Release the connection before the outside calls below.
     await db.rollback()
 
@@ -358,7 +372,7 @@ async def handle_registration(
         db.add(user)
         await db.flush()
 
-        rows = [_build_profile(p, user_id, urls.get(p.type)) for p in payload.profiles]
+        rows = [_build_profile(p, user_id, urls.get(p.type), game_ids) for p in payload.profiles]
         await _insert_profiles(rows, db)
 
         user.default_profile_id = next(row.id for row, _ in rows if row.type == payload.default_profile)
@@ -602,6 +616,7 @@ async def add_profile(
         raise HTTPException(status_code=409, detail=f"You already have a {profile.type} profile.")
 
     await check_username_available(profile.username, profile.type, db, ("body", "username"))
+    game_ids = await _game_ids([profile], db)
 
     default_picture = None
 
@@ -629,7 +644,7 @@ async def add_profile(
     paths = [pfp_path] if pfp_path else []
 
     try:
-        await _insert_profiles([_build_profile(profile, user_id, pfp_url)], db)
+        await _insert_profiles([_build_profile(profile, user_id, pfp_url, game_ids)], db)
         await db.commit()
     except IntegrityError as e:
         await db.rollback()

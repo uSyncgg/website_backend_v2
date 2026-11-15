@@ -1,9 +1,10 @@
 """
-Pure bracket logic, ported from the frontend's src/utils/bracket.js so the server can check who is
-in a match before it accepts a score. Brackets are derived from (seeds + results) every time, so
-changing an early result clears any later match it no longer feeds into.
+Pure bracket logic - the only copy. app.services.bracket_sync turns its output into
+bracket_matches rows, and the API sends the built bracket to the frontend, which only draws it.
 
-Keep this file in step with bracket.js: the two must build identical match ids and statuses.
+A bracket is built from (seeds + results); results come from the stored match rows. Swiss is the
+exception that keeps its history: a round is paired once, stored, and passed back in as `fixed`
+so it's never paired again (changing an earlier result only moves the standings).
 
 A match is a dict: { id, round, slot, a, b, status, winner, loser, scoreA?, scoreB?, forfeit? }.
 status is 'empty' (bye vs bye) | 'bye' | 'pending' (waiting on an earlier match) | 'ready' | 'complete'.
@@ -204,9 +205,15 @@ def swiss_round_count(n: int) -> int:
     return max(1, math.ceil(math.log2(n)))
 
 
-def build_swiss(seeds: list, results: dict) -> dict:
+def build_swiss(seeds: list, results: dict, fixed: dict | None = None) -> dict:
+    """
+    `fixed` ({round: [(code, a, b), ...]}) holds rounds already paired and stored; those pairings
+    are kept as they are. A new round is paired only once every match before it is played.
+    """
+
+    fixed = fixed or {}
     if len(seeds) < 2:
-        return {"rounds": []}
+        return {"rounds": [], "standings": []}
     total = swiss_round_count(len(seeds))
     per_round = len(seeds) // 2
     rounds: list[list[dict]] = []
@@ -221,6 +228,16 @@ def build_swiss(seeds: list, results: dict) -> dict:
         if prev and any(m["status"] not in ("complete", "bye") for m in prev):
             rounds.append([{"id": f"sw{rnd}m{i}", "round": rnd, "slot": i, "a": None, "b": None, "status": "pending", "winner": None, "loser": None}
                            for i in range(per_round)])
+            continue
+        if rnd in fixed:
+            matches = []
+            for code, a, b in fixed[rnd]:
+                if a and b:
+                    met.add(key(a, b) if b != BYE else f"{a}|bye")
+                if b == BYE:
+                    byes.add(a)
+                matches.append(_decide({"id": code, "round": rnd, "slot": len(matches), "a": a, "b": b}, results))
+            rounds.append(matches)
             continue
         pool = list(seeds) if rnd == 0 else [r["id"] for r in standings_of(seeds, [m for r in rounds for m in r])]
         bye = None
@@ -243,7 +260,7 @@ def build_swiss(seeds: list, results: dict) -> dict:
         if bye:
             matches.append(_decide({"id": f"sw{rnd}bye", "round": rnd, "slot": len(pairs), "a": bye, "b": BYE}, results))
         rounds.append(matches)
-    return {"rounds": rounds}
+    return {"rounds": rounds, "standings": standings_of(seeds, [m for r in rounds for m in r])}
 
 
 def is_final_match(fmt: str, built: dict, match: dict) -> bool:
@@ -254,11 +271,12 @@ def is_final_match(fmt: str, built: dict, match: dict) -> bool:
     return False
 
 
-def build_bracket(fmt: str, seeds: list, results: dict) -> dict:
+def build_bracket(fmt: str, seeds: list, results: dict, fixed: dict | None = None) -> dict:
     if fmt == "swiss":
-        return build_swiss(seeds, results)
+        return build_swiss(seeds, results, fixed)
     if fmt == "round_robin":
-        return build_round_robin(seeds, results)
+        built = build_round_robin(seeds, results)
+        return {**built, "standings": standings_of(seeds, [m for r in built["rounds"] for m in r])}
     if fmt == "double_elim":
         return build_double_elim(seeds, results)
     return build_single_elim(seeds, results)
@@ -279,3 +297,78 @@ def progress(built: dict) -> tuple[int, int]:
 
 def ready_matches(built: dict) -> list[dict]:
     return [m for m in all_matches(built) if m["status"] == "ready"]
+
+
+def match_stage(fmt: str, match: dict) -> str:
+    if fmt == "double_elim":
+        return {"losers": "losers", "grand": "grand"}.get(match.get("bracket"), "winners")
+    return "main"
+
+
+def match_links(fmt: str, seed_count: int) -> dict:
+    """
+    {code: {"next": (code, slot) | None, "loser_next": (code, slot) | None}} - where each match's
+    winner and loser go, for elimination formats. Found by building the bracket once with
+    placeholder results ("W:<code>" wins every match, "L:<code>" loses) and reading where each
+    placeholder lands, so the links always match the builders above. The grand final reset (gf2)
+    only exists when the losers-side player wins gf1, so nothing links into it.
+    """
+
+    if fmt not in FINAL_FORMATS or seed_count < 2:
+        return {}
+
+    global _decide
+    real = _decide
+
+    def symbolic(match: dict, _results: dict) -> dict:
+        a, b = match["a"], match["b"]
+        if a == BYE or b == BYE:
+            return real(match, {})
+        return {**match, "status": "complete", "winner": f"W:{match['id']}", "loser": f"L:{match['id']}", "scoreA": 1, "scoreB": 0}
+
+    _decide = symbolic
+    try:
+        built = build_bracket(fmt, [f"s{i}" for i in range(seed_count)], {})
+    finally:
+        _decide = real
+
+    links: dict = {}
+    for m in all_matches(built):
+        links.setdefault(m["id"], {"next": None, "loser_next": None})
+        if m["id"] == "gf2":
+            continue
+        for side in ("a", "b"):
+            value = m[side]
+            if isinstance(value, str) and value[:2] in ("W:", "L:"):
+                source = links.setdefault(value[2:], {"next": None, "loser_next": None})
+                source["next" if value[0] == "W" else "loser_next"] = (m["id"], side)
+    return links
+
+
+def placements(fmt: str, built: dict) -> list | None:
+    """
+    Final placings once the event is decided: [1st, 2nd, 3rd] (3rd may be None).
+    - Single elim: 3rd is the semifinal loser who lost to the champion.
+    - Double elim: 2nd is the grand final loser, 3rd the losers final loser.
+    - Round robin / swiss: the top three in the standings once every match is played.
+    """
+
+    if fmt in ("round_robin", "swiss"):
+        done, total = progress(built)
+        if not total or done < total:
+            return None
+        return [row["id"] for row in built["standings"][:3]]
+    if not built.get("champion"):
+        return None
+    if fmt == "double_elim":
+        gf = built["grandFinal"][-1]
+        lf = built["losersRounds"][-1][0] if built["losersRounds"] else None
+        second = gf["loser"] if gf["status"] == "complete" else None
+        third = lf["loser"] if lf and is_entrant(lf.get("loser")) else None
+        return [built["champion"], second, third]
+    rounds = built["rounds"]
+    final = rounds[-1][0]
+    semis = rounds[-2] if len(rounds) >= 2 else []
+    champions_semi = next((m for m in semis if m["winner"] == built["champion"]), None)
+    third = champions_semi["loser"] if champions_semi and is_entrant(champions_semi.get("loser")) else None
+    return [built["champion"], final["loser"], third]

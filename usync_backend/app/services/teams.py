@@ -2,17 +2,19 @@ import uuid
 import unicodedata
 
 from fastapi import HTTPException, UploadFile
-from sqlalchemy import select, update, delete, or_
+from sqlalchemy import select, update, delete, or_, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from supabase import AsyncClient
 from openai import AsyncOpenAI
 from app.models.users import Profiles
-from app.models.teams import Teams, TeamMembers, TeamInvites
+from app.models.teams import Teams, TeamGames, TeamMembers, TeamInvites
+from app.models.games import Games
 from app.models.brackets import BracketEntries
 from app.services.naming import new_public_id, canonical_username, profile_summary, get_own_profile, moderate_name
 from app.services.pictures import process_pfp, remove_pfps, storage_path
-from app.services.brackets import assert_roster_unlocked, sync_team, before_team_deleted, refresh_events
+from app.services.brackets import sync_team, before_team_deleted, refresh_events
+from app.services.lookups import games_by_keys
 from app.services.notifications import notify
 from app.schemas.users import (
     ProfileSummary,
@@ -28,10 +30,11 @@ from app.schemas.users import (
 # manages it (invites, captains, entering events and paying for entries); players join by
 # accepting an invite to their player profile. Only player profiles can be on a team.
 #
-# Roster changes are checked against bracket events (app.services.brackets): rosters are locked
-# while a team is seeded in a live bracket, and a change moves the team's sign-ups between
-# pending and signed up. Neither brackets nor pictures import this module, so all imports sit
-# at the top.
+# A team plays one or more games (team_games) and can enter events for any of them. Its roster
+# never freezes: each event keeps its own roster of the players the captain picked
+# (bracket_entry_players), and a change to the team only updates sign-ups for events that haven't
+# started (app.services.brackets.sync_team). Neither brackets nor pictures import this module,
+# so all imports sit at the top.
 
 MAX_TEAMS_PER_OWNER = 50
 SEARCH_LIMIT = 8
@@ -40,16 +43,35 @@ TAKEN_NAME = "You already have a team with that name."
 def canonical_team_name(name: str) -> str:
     return unicodedata.normalize("NFKC", name).casefold().strip()
 
-def new_team(owner_profile_id, name: str, game: str | None, picture: str | None = None) -> Teams:
+def new_team(owner_profile_id, name: str, picture: str | None = None) -> Teams:
     return Teams(
         id = uuid.uuid4(),
         public_id = new_public_id(),
         owner_profile_id = owner_profile_id,
         name = name.strip(),
         canonical_name = canonical_team_name(name),
-        game = game or None,
         picture = picture
     )
+
+def team_game_rows(team: Teams, game_ids) -> list[TeamGames]:
+    return [TeamGames(team_id = team.id, game_id = g) for g in dict.fromkeys(game_ids)]
+
+async def game_ids_for(keys: list[str], db: AsyncSession) -> list[int]:
+    """
+    The lookup ids for a team's game keys, in the order given (422 for an unknown key).
+    """
+
+    games = {g.key: g.id for g in await games_by_keys(keys, db)}
+    return [games[k] for k in keys]
+
+async def _team_games(team_ids, db: AsyncSession) -> dict:
+    out: dict = {t: [] for t in team_ids}
+    for team_id, key, name in (await db.execute(
+        select(TeamGames.team_id, Games.key, Games.name).join(Games, Games.id == TeamGames.game_id)
+        .where(TeamGames.team_id.in_(list(team_ids))).order_by(Games.sort_order, Games.name)
+    )).all():
+        out[team_id].append({"key": key, "name": name})
+    return out
 
 async def _teams_out(teams: list[Teams], db: AsyncSession, viewer_id: str | None = None, include_invites: bool = False) -> list[TeamOut]:
     """
@@ -68,6 +90,7 @@ async def _teams_out(teams: list[Teams], db: AsyncSession, viewer_id: str | None
     }
     members: dict = {t.id: [] for t in teams}
     invites: dict = {t.id: [] for t in teams}
+    games = await _team_games(team_ids, db)
     my_roles: dict = {}
 
     rows = await db.execute(
@@ -112,7 +135,7 @@ async def _teams_out(teams: list[Teams], db: AsyncSession, viewer_id: str | None
         TeamOut(
             public_id = t.public_id,
             name = t.name,
-            game = t.game,
+            games = games[t.id],
             picture = t.picture,
             created_at = t.created_at,
             owner = profile_summary(owners[t.owner_profile_id]),
@@ -278,6 +301,7 @@ async def create_team(
         player = await _invitable_player(user_id, username, db)
         invitees[player.id] = player
 
+    game_ids = await game_ids_for(body.games, db)
     owner_id = owner.id
     await db.rollback()
 
@@ -290,13 +314,14 @@ async def create_team(
         url, path = await process_pfp(picture, supabase, user_id, openai)
 
     try:
-        team = new_team(owner_id, body.name, body.game, url)
+        team = new_team(owner_id, body.name, url)
         db.add(team)
         await db.flush()
+        db.add_all(team_game_rows(team, game_ids))
         # A player who makes their own team is on it as its captain.
         if body.owner_type == "player":
             db.add(TeamMembers(team_id = team.id, profile_id = owner_id, role = "captain"))
-        db.add_all([TeamInvites(team_id = team.id, profile_id = pid) for pid in invitees])
+        db.add_all([TeamInvites(team_id = team.id, profile_id = pid, invited_by_profile_id = owner_id) for pid in invitees])
         await db.commit()
     except IntegrityError:
         await db.rollback()
@@ -316,9 +341,17 @@ async def update_team(user_id: str, team_public_id: str, body: TeamUpdate, db: A
     if values.get("name"):
         await moderate_name(values["name"], openai, "team name")
 
+    games = values.pop("games", None)
+
     if "name" in values:
         values["name"] = values["name"].strip()
         values["canonical_name"] = canonical_team_name(values["name"])
+
+    if games is not None:
+        game_ids = await game_ids_for(games, db)
+        await db.execute(delete(TeamGames).where(TeamGames.team_id == team.id))
+        db.add_all(team_game_rows(team, game_ids))
+        await db.commit()
 
     if values:
         try:
@@ -399,7 +432,7 @@ async def invite_player(user_id: str, team_public_id: str, username: str, db: As
     duplicate = f"{player.username} already has an invite to {team.name}."
 
     try:
-        db.add(TeamInvites(team_id = team.id, profile_id = player.id))
+        db.add(TeamInvites(team_id = team.id, profile_id = player.id, invited_by_profile_id = team.owner_profile_id))
         await db.commit()
     except IntegrityError:
         await db.rollback()
@@ -415,7 +448,7 @@ async def cancel_invite(user_id: str, team_public_id: str, invite_id: uuid.UUID,
         .where(TeamInvites.id == invite_id)
         .where(TeamInvites.team_id == team.id)
         .where(TeamInvites.status == "pending")
-        .values(status = "cancelled")
+        .values(status = "cancelled", responded_at = func.now())
     )
     await db.commit()
 
@@ -444,7 +477,6 @@ async def remove_member(user_id: str, team_public_id: str, player_public_id: str
 
     team = await _owned_team(user_id, team_public_id, db)
     player = await _player_by_public_id(player_public_id, db)
-    await assert_roster_unlocked(team.id, db)
 
     await db.execute(
         delete(TeamMembers).where(TeamMembers.team_id == team.id).where(TeamMembers.profile_id == player.id)
@@ -468,7 +500,6 @@ async def leave_team(user_id: str, team_public_id: str, db: AsyncSession) -> Non
     if team.owner_profile_id == player.id:
         raise HTTPException(status_code=409, detail="You own this team. Delete it instead.")
 
-    await assert_roster_unlocked(team.id, db)
 
     await db.execute(delete(TeamMembers).where(TeamMembers.team_id == team.id).where(TeamMembers.profile_id == player.id))
     await sync_team(team.id, db)
@@ -525,10 +556,8 @@ async def respond_to_invite(user_id: str, invite_id: uuid.UUID, accept: bool, db
     if not invite:
         raise HTTPException(status_code=404, detail="Invite not found.")
 
-    if accept:
-        await assert_roster_unlocked(invite.team_id, db)
-
     invite.status = "accepted" if accept else "declined"
+    invite.responded_at = func.now()
 
     if accept:
         already = (await db.execute(

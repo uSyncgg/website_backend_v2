@@ -19,7 +19,6 @@ class Teams(Base):
     owner_profile_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("profiles.id", ondelete = "CASCADE"), index = True)
     name: Mapped[str] = mapped_column()
     canonical_name: Mapped[str] = mapped_column()
-    game: Mapped[str | None] = mapped_column(nullable = True)
     picture: Mapped[str | None] = mapped_column(nullable = True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = text("now()"))
 

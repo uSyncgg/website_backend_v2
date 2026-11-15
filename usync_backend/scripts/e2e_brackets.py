@@ -1,47 +1,60 @@
 """
-End-to-end check of bracket hosting against the real database, through the service layer (the
-routers are thin). Creates throwaway accounts named e2e-*, runs a 4v4 event from sign-up to the
-final, and deletes everything it made at the end (accounts cascade to profiles, teams, events,
-entries and notifications).
+End-to-end check of bracket hosting through the service layer (the routers are thin). Creates
+throwaway accounts named e2e-*, runs sign-ups, seeding, publishing, reporting, disputes, the
+admin queue, rulings, Swiss and double elimination, then deletes everything it made.
 
-Run from usync_backend:  uv run python scripts/e2e_brackets.py
+It writes to whatever database ASYNC_SUPABASE_CONNECTION_URL points at, so run it against a local
+or throwaway database:
+
+    ASYNC_SUPABASE_CONNECTION_URL=postgresql+asyncpg://... uv run python scripts/e2e_brackets.py
+
+It refuses to run against a non-local host unless E2E_ALLOW_REMOTE=1 is set.
 """
 import asyncio
+import os
 import sys
 import uuid
 from types import SimpleNamespace as NS
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 sys.path.insert(0, ".")
-from dotenv import load_dotenv
-load_dotenv()
+
+_host = urlparse(os.environ.get("ASYNC_SUPABASE_CONNECTION_URL", "").replace("+asyncpg", "")).hostname
+if _host not in ("127.0.0.1", "localhost") and os.environ.get("E2E_ALLOW_REMOTE") != "1":
+    sys.exit(f"Refusing to run against {_host!r}. Point ASYNC_SUPABASE_CONNECTION_URL at a local database (or set E2E_ALLOW_REMOTE=1).")
 
 from fastapi import HTTPException
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, update
 from app.core.db import AsyncSessionLocal, engine
 from app.models.users import UsersParent, Profiles
-from app.models.teams import Teams, TeamMembers, TeamInvites
-from app.models.brackets import Notifications, BracketEvents
+from app.models.teams import TeamMembers
+from app.models.brackets import Notifications, BracketMatches, MatchReports, EventIssues, Brackets, BracketEvents
 from app.services import brackets as svc
 from app.services import teams as team_svc
-from app.services.notifications import list_notifications
-from app.schemas.brackets import EventCreate, EventUpdate, Registration, MatchScore, EventDelay, AdminInvite
+from app.services import event_issues as queue_svc
+from app.services import matches as match_svc
+from app.services.notifications import list_notifications, mark_read, delete_old_read
+from app.schemas.brackets import EventCreate, Registration, MatchScore, Ruling, AdminInvite
+from app.schemas.users import TeamUpdate
 
 RUN = uuid.uuid4().hex[:6]
 accounts = []
 failures = []
+NOW = datetime.now(timezone.utc)
 
 def check(label, ok):
     print(("  PASS " if ok else "  FAIL ") + label)
     if not ok:
         failures.append(label)
 
-async def expect_http(label, coro, status):
+async def expect_http(db, label, coro, status):
     try:
         await coro
         check(f"{label} (expected {status}, got success)", False)
     except HTTPException as e:
         check(f"{label} -> {e.status_code}: {e.detail}", e.status_code == status)
+    await db.rollback()
 
 async def make_account(db, name, ptype="player"):
     uid = uuid.uuid4()
@@ -54,223 +67,305 @@ async def make_account(db, name, ptype="player"):
     accounts.append(uid)
     return str(uid), NS(id = profile.id, public_id = profile.public_id, username = profile.username)
 
-async def make_team(db, owner_profile, name, game, members, captain=None):
-    team = team_svc.new_team(owner_profile.id, f"{name} {RUN}", game)
+async def make_team(db, name, games, members):
+    """members[0] owns it and is its captain."""
+    team = team_svc.new_team(members[0].id, f"{name} {RUN}")
     db.add(team)
     await db.flush()
-    for p in members:
-        db.add(TeamMembers(team_id = team.id, profile_id = p.id, role = "captain" if p is captain else "player"))
+    db.add_all(team_svc.team_game_rows(team, await team_svc.game_ids_for(games, db)))
+    for i, p in enumerate(members):
+        db.add(TeamMembers(team_id = team.id, profile_id = p.id, role = "captain" if i == 0 else "player"))
     await db.flush()
-    return NS(id = team.id, public_id = team.public_id)
+    return NS(id = team.id, public_id = team.public_id, name = team.name)
 
 async def notes(db, uid, type_=None):
-    items = await list_notifications(uid, db)
-    return [n for n in items if type_ is None or n["type"] == type_]
+    return [n for n in await list_notifications(uid, db) if type_ is None or n["type"] == type_]
+
+def entrant(ev, team):
+    return next(e for e in ev["entrants"] if e["name"] == team.name)
+
+def match(ev, code):
+    from app.services.bracket_engine import all_matches
+    return next(m for m in all_matches(ev["bracket"]["built"]) if m["id"] == code)
+
+def event_body(host, name, **kw):
+    base = dict(host_profile = host.public_id, name = f"E2E {name} {RUN}", event_type = "tournament", game = "halo",
+                game_title = "halo_infinite", format = "single_elim", team_size = "2v2", best_of = 3,
+                starts_at = NOW - timedelta(minutes = 30))
+    return EventCreate(**{**base, **kw})
+
+async def backdate(db, model, where, **values):
+    await db.execute(update(model).where(where).values(**values))
+    await db.commit()
 
 async def main():
     async with AsyncSessionLocal() as db:
         print("setup")
         host_uid, host = await make_account(db, "host", "host")
-        a_uids, a_players = zip(*[await make_account(db, f"a{i}") for i in range(4)])
-        b_uids, b_players = zip(*[await make_account(db, f"b{i}") for i in range(4)])
-        c_uids, c_players = zip(*[await make_account(db, f"c{i}") for i in range(4)])
-        team_a = await make_team(db, a_players[0], "Alpha", "Halo", a_players[:3], captain = a_players[0])
-        team_b = await make_team(db, b_players[0], "Bravo", "Halo", b_players, captain = b_players[0])
-        team_c = await make_team(db, c_players[0], "Charlie", "Halo", c_players, captain = c_players[0])
-        team_wrong = await make_team(db, a_players[1], "WrongGame", "Valorant", a_players[1:], captain = a_players[1])
-        team_nogame = await make_team(db, a_players[2], "NoGame", None, a_players[2:], captain = a_players[2])
-        invite = TeamInvites(id = uuid.uuid4(), team_id = team_a.id, profile_id = a_players[3].id)
-        db.add(invite)
-        invite = NS(id = invite.id)
+        adm_uid, adm = await make_account(db, "adm")
+        p = {}
+        for t in "abcde":
+            for i in range(3):
+                p[f"{t}{i}"] = await make_account(db, f"{t}{i}")
+        uid = {k: v[0] for k, v in p.items()}
+        pr = {k: v[1] for k, v in p.items()}
+        team_a = await make_team(db, "Alpha", ["halo"], [pr["a0"], pr["a1"], pr["a2"]])
+        team_b = await make_team(db, "Bravo", ["halo"], [pr["b0"], pr["b1"], pr["b2"], pr["a1"]])
+        team_c = await make_team(db, "Charlie", ["valorant"], [pr["c0"], pr["c1"], pr["c2"]])
+        team_d = await make_team(db, "Delta", ["halo", "cs2"], [pr["d0"], pr["d1"], pr["d2"]])
+        team_e = await make_team(db, "Echo", ["halo"], [pr["e0"], pr["e1"], pr["e2"]])
         await db.commit()
 
         print("create event")
-        await expect_http("a player can't post an event", svc.create_event(a_uids[0], EventCreate(
-            host_profile = a_players[0].public_id, name = "x", event_type = "tournament", game = "Halo", format = "single_elim",
-            team_size = "4v4", best_of = 3, starts_at = datetime.now(timezone.utc)), db), 403)
-        ev = await svc.create_event(host_uid, EventCreate(
-            host_profile = host.public_id, name = f"E2E Halo 4v4 {RUN}", event_type = "tournament", game = "Halo",
-            format = "single_elim", team_size = "4v4", best_of = 3, max_entrants = 2, no_show_minutes = 10,
-            starts_at = datetime.now(timezone.utc) - timedelta(minutes = 30)), db)
+        await expect_http(db, "a game with titles needs one", svc.create_event(host_uid, event_body(host, "x", game_title = None), db), 422)
+        await expect_http(db, "a title from another game is refused", svc.create_event(host_uid, event_body(host, "x", game_title = "black_ops_7"), db), 422)
+        await expect_http(db, "a mode for a game without modes is refused", svc.create_event(host_uid, event_body(host, "x", game_mode = "slayer"), db), 422)
+        await expect_http(db, "unknown format refused", svc.create_event(host_uid, event_body(host, "x", format = "ladder"), db), 422)
+        await expect_http(db, "a player can't host", svc.create_event(uid["a0"], event_body(pr["a0"], "x"), db), 403)
+        ev = await svc.create_event(host_uid, event_body(host, "Cup", final_best_of = 5, max_entrants = 4, min_entrants = 4, no_show_minutes = 10,
+            payments = {"enabled": False, "notifyEmail": "host@example.com"},
+            signup_form = {"playerFields": ["Discord"], "questions": [{"label": "Region", "type": "select", "options": "NA, EU", "required": True}]}), db)
         eid = ev["id"]
-        check("event created with team size 4v4", ev["teamSize"] == "4v4" and ev["canManage"])
-
-        print("sign-ups")
-        reg = lambda team: Registration(team_id = team.public_id, email = "cap@example.com")
-        await expect_http("team game must match", svc.register(a_uids[1], eid, reg(team_wrong), db), 409)
-        await expect_http("team without a game can't enter", svc.register(a_uids[2], eid, reg(team_nogame), db), 409)
-        await expect_http("a plain player can't enter their team", svc.register(b_uids[2], eid, reg(team_b), db), 403)
-        await expect_http("1v1-style sign-up rejected for a team event", svc.register(b_uids[2], eid, Registration(email = "x@example.com"), db), 422)
-        ev = await svc.register(a_uids[0], eid, reg(team_a), db)
-        alpha = next(e for e in ev["entrants"] if e["teamId"] == team_a.public_id)
-        check("3-player team is pending in a 4v4", alpha["status"] == "pending" and alpha["rosterSize"] == 3)
-        await expect_http("can't enter the same team twice", svc.register(a_uids[0], eid, reg(team_a), db), 409)
-        ev = await svc.register(b_uids[0], eid, reg(team_b), db)
-        ev = await svc.register(c_uids[0], eid, reg(team_c), db)
-        status = {e["name"].split()[0]: e["status"] for e in ev["entrants"]}
-        check(f"pending Alpha takes no spot, so Bravo and Charlie both fit in max 2: {status}",
-              status == {"Alpha": "pending", "Bravo": "signed_up", "Charlie": "signed_up"} or status == {"Alpha": "pending", "Bravo": "signed_up", "Charlie": "signed_up"})
-
-        print("4th player joins Alpha")
-        await team_svc.respond_to_invite(a_uids[3], invite.id, True, db)
-        ev = await svc.get_event(eid, host_uid, db)
-        status = {e["name"].split()[0]: e["status"] for e in ev["entrants"]}
-        check(f"Alpha now has 4 players but the event is full, so it waits: {status}", status["Alpha"] == "pending")
-        check("Alpha's owner got 'team_joined'", len(await notes(db, a_uids[0], "team_joined")) == 1)
-
-        print("Charlie unregisters -> Alpha takes the spot")
-        ev = await svc.unregister(c_uids[0], eid, db)
-        status = {e["name"].split()[0]: e["status"] for e in ev["entrants"]}
-        check(f"Alpha promoted to signed up: {status}", status == {"Alpha": "signed_up", "Bravo": "signed_up"})
-        check("every Alpha player got 'team_signed_up'", all([len(await notes(db, u, "team_signed_up")) == 1 for u in a_uids]))
-
-        print("Alpha drops to 3 before the start -> pending again")
-        await team_svc.remove_member(a_uids[0], team_a.public_id, a_players[3].public_id, db)
-        ev = await svc.get_event(eid, host_uid, db)
-        check("Alpha back to pending", next(e for e in ev["entrants"] if e["name"].startswith("Alpha"))["status"] == "pending")
-        check("Alpha got 'team_pending'", len(await notes(db, a_uids[0], "team_pending")) == 1)
-        invite2 = TeamInvites(id = uuid.uuid4(), team_id = team_a.id, profile_id = a_players[3].id)
-        db.add(invite2)
-        invite2 = NS(id = invite2.id)
-        await db.commit()
-        await team_svc.respond_to_invite(a_uids[3], invite2.id, True, db)
-        ev = await svc.get_event(eid, host_uid, db)
-        ids = {e["name"].split()[0]: e["id"] for e in ev["entrants"]}
-        check("Alpha signed up again after the 4th rejoins", next(e for e in ev["entrants"] if e["name"].startswith("Alpha"))["status"] == "signed_up")
-
-        print("seeding and publishing")
-        ev = await svc.register(c_uids[0], eid, reg(team_c), db)
-        ids = {e["name"].split()[0]: e["id"] for e in ev["entrants"]}
-        await expect_http("pending teams can't be seeded", svc.save_draft(host_uid, eid, [ids["Alpha"], ids["Charlie"]], db), 422)
-        await expect_http("only the host can seed", svc.save_draft(a_uids[0], eid, [ids["Alpha"], ids["Bravo"]], db), 404)
-        await svc.save_draft(host_uid, eid, [ids["Alpha"], ids["Bravo"]], db)
-        anon = await svc.get_event(eid, None, db)
-        check("the public can't see a draft bracket", anon["bracket"] is None)
-        ev = await svc.publish(host_uid, eid, db)
-        check("published: sign-ups closed, rosters locked", ev["bracket"]["published"] and not ev["registrationOpen"] and ev["rostersLocked"])
-        check("both teams got 'match_ready'", len(await notes(db, a_uids[2], "match_ready")) == 1 and len(await notes(db, b_uids[3], "match_ready")) == 1)
-        check("pending Charlie got no match", len(await notes(db, c_uids[0], "match_ready")) == 0)
-
-        print("rosters frozen while live")
-        await expect_http("can't remove a player while live", team_svc.remove_member(a_uids[0], team_a.public_id, a_players[3].public_id, db), 409)
-        await expect_http("can't leave while live", team_svc.leave_team(a_uids[1], team_a.public_id, db), 409)
-        await expect_http("can't delete the team while live", team_svc.delete_team(a_uids[0], team_a.public_id, db, None), 409)
-
-        print("score reporting")
-        ev = await svc.get_event(eid, a_uids[2], db)
-        check("a non-captain sees their entrant but can't act", ev["viewerEntrantId"] == ids["Alpha"] and not ev["viewerCanAct"])
-        await expect_http("a non-captain can't report", svc.player_report(a_uids[2], eid, "r0m0", MatchScore(score_a = 2, score_b = 1), db), 403)
-        await expect_http("tied scores rejected", svc.player_report(a_uids[0], eid, "r0m0", MatchScore(score_a = 1, score_b = 1), db), 422)
-        await expect_http("a Bo3 can't end 3-0", svc.player_report(a_uids[0], eid, "r0m0", MatchScore(score_a = 3, score_b = 0), db), 422)
-        await expect_http("a Bo3 can't end 1-0", svc.player_report(a_uids[0], eid, "r0m0", MatchScore(score_a = 1, score_b = 0), db), 422)
-        await expect_http("someone outside the match can't report", svc.player_report(c_uids[0], eid, "r0m0", MatchScore(score_a = 2, score_b = 1), db), 409)
-        await svc.player_report(a_uids[0], eid, "r0m0", MatchScore(score_a = 2, score_b = 1), db)
-        check("Bravo got 'opponent_reported'", len(await notes(db, b_uids[1], "opponent_reported")) == 1)
-        await svc.player_report(b_uids[0], eid, "r0m0", MatchScore(score_a = 0, score_b = 2), db)
-        check("both sides got 'score_disputed'", len(await notes(db, a_uids[1], "score_disputed")) == 1 and len(await notes(db, b_uids[1], "score_disputed")) == 1)
-        check("the host got 'score_disputed'", len(await notes(db, host_uid, "score_disputed")) == 1)
-
-        print("no-show")
-        await expect_http("no-show timer counts from the match's start, not the event's", svc.report_no_show(b_uids[0], eid, "r0m0", db), 409)
-        await backdate_match_start(db, eid, "r0m0", minutes = 15)
-        await svc.report_no_show(b_uids[0], eid, "r0m0", db)
-        check("Alpha told it was reported as a no-show", any(n["data"].get("against_you") for n in await notes(db, a_uids[0], "no_show_reported")))
-        check("the host told about the no-show", len(await notes(db, host_uid, "no_show_reported")) == 1)
-
-        print("host decides")
-        ev = await svc.host_report(host_uid, eid, "r0m0", MatchScore(score_a = 2, score_b = 0), db)
-        check("host's call is final and clears reports", ev["bracket"]["results"]["r0m0"]["scoreA"] == 2 and "r0m0" not in ev["bracket"]["reports"])
-        check("event complete -> rosters unlock", not ev["rostersLocked"])
-        ev = await svc.revert_decision(host_uid, eid, ev["bracket"]["log"][-1]["id"], db)
-        check("revert puts the reports back", "r0m0" not in ev["bracket"]["results"] and len(ev["bracket"]["reports"]["r0m0"]) == 2)
-        ev = await svc.host_report(host_uid, eid, "r0m0", MatchScore(score_a = 2, score_b = 0), db)
-
-        print("delay")
-        await svc.delay_start(host_uid, eid, EventDelay(starts_at = datetime.now(timezone.utc) + timedelta(hours = 1), reason = "Server issues"), db)
-        check("every player on both teams got 'event_delayed'", all([len(await notes(db, u, "event_delayed")) == 1 for u in a_uids + b_uids]))
-        check("entered list includes the event for a teammate", any(e["id"] == eid for e in await svc.entered_events(a_uids[2], db)))
-        check("hosting list includes it for the host", any(e["id"] == eid for e in await svc.hosting_events(host_uid, db)))
-        anon = await svc.get_event(eid, None, db)
-        check("anonymous viewers don't see emails", all("email" not in e for e in anon["entrants"]))
-        check("anonymous viewers don't see the payment setup's email", "notifyEmail" not in anon["payments"])
-
-        print("1v1 event")
-        solo = await svc.create_event(host_uid, EventCreate(
-            host_profile = host.public_id, name = f"E2E 1v1 {RUN}", event_type = "tournament", game = "Halo",
-            format = "double_elim", team_size = "1v1", best_of = 1, max_entrants = 2, starts_at = datetime.now(timezone.utc)), db)
-        await expect_http("team entries rejected for 1v1", svc.register(a_uids[0], solo["id"], reg(team_a), db), 422)
-        ev = await svc.register(a_uids[0], solo["id"], Registration(email = "p@example.com"), db)
-        check("solo entrant signed up under their username", ev["entrants"][0]["status"] == "signed_up" and ev["entrants"][0]["name"] == a_players[0].username)
-        await svc.register(c_uids[0], solo["id"], Registration(email = "p@example.com"), db)
-        await expect_http("1v1 event full", svc.register(b_uids[0], solo["id"], Registration(email = "p@example.com"), db), 409)
-        await expect_http("host can't host as a player-only account", svc.create_event(a_uids[1], EventCreate(
-            host_profile = host.public_id, name = "x", event_type = "tournament", game = "Halo", format = "single_elim",
-            team_size = "1v1", best_of = 1, starts_at = datetime.now(timezone.utc)), db), 403)
-
-        print("event options")
-        opts = await svc.create_event(host_uid, EventCreate(
-            host_profile = host.public_id, name = f"E2E options {RUN}", event_type = "league", game = "Call of Duty",
-            game_title = "Black Ops 7", format = "single_elim", team_size = "1v1", best_of = 3, final_best_of = 7,
-            max_entrants = 8, min_entrants = 4, platform = "console_only", restrictions = ["  No snipers ", "NA only"],
-            location_type = "in_person", venue = "Somewhere", starts_at = datetime.now(timezone.utc),
-            admins = [a_players[0].public_id]), db)
-        check("options saved", opts["gameTitle"] == "Black Ops 7" and opts["finalBestOf"] == 7 and opts["minEntrants"] == 4
-              and opts["platform"] == "console_only" and opts["restrictions"] == ["No snipers", "NA only"])
-        check("non-LAN events are always online", opts["locationType"] == "online" and opts["venue"] == "")
-        check("admin invited at creation", [(x["username"], x["status"]) for x in opts["admins"]] == [(a_players[0].username, "pending")])
-        lan = await svc.create_event(host_uid, EventCreate(
-            host_profile = host.public_id, name = f"E2E LAN {RUN}", event_type = "lan", game = "Halo", format = "swiss",
-            team_size = "1v1", best_of = 3, final_best_of = 5, venue = "Arena", starts_at = datetime.now(timezone.utc)), db)
-        check("LANs are in person; swiss has no finals best of", lan["locationType"] == "in_person" and lan["venue"] == "Arena"
-              and lan["format"] == "swiss" and lan["finalBestOf"] is None)
-        await expect_http("min above max refused", svc.create_event(host_uid, EventCreate(
-            host_profile = host.public_id, name = "x", event_type = "league", game = "Halo", format = "single_elim",
-            team_size = "1v1", best_of = 3, max_entrants = 4, min_entrants = 8, starts_at = datetime.now(timezone.utc)), db), 422)
-        await expect_http("even finals best of refused", svc.create_event(host_uid, EventCreate(
-            host_profile = host.public_id, name = "x", event_type = "league", game = "Halo", format = "single_elim",
-            team_size = "1v1", best_of = 3, final_best_of = 4, starts_at = datetime.now(timezone.utc)), db), 422)
+        check("event created with game, title and lookups", ev["game"] == "Halo" and ev["gameTitle"] == "Halo Infinite" and ev["teamSize"] == "2v2")
 
         print("admins")
-        oid = opts["id"]
-        await expect_http("pending admin can't manage yet", svc.update_event(a_uids[0], oid, EventUpdate(name = "nope"), db), 404)
-        invites = await svc.my_admin_invites(a_uids[0], db)
-        check("invitee sees the invite", len(invites) == 1 and invites[0]["eventId"] == oid)
-        check("the pending invite is the only bell item (no duplicate notification)", len(await notes(db, a_uids[0], "admin_invite")) == 0)
-        await svc.respond_admin_invite(a_uids[0], uuid.UUID(invites[0]["id"]), True, db)
-        check("host told the admin joined", len(await notes(db, host_uid, "admin_joined")) == 1)
-        as_admin = await svc.get_event(oid, a_uids[0], db)
-        check("admin can manage but isn't the host", as_admin["canManage"] and not as_admin["isHost"])
-        check("event on the admin's Hosting list", oid in [e["id"] for e in await svc.hosting_events(a_uids[0], db)])
-        renamed = await svc.update_event(a_uids[0], oid, EventUpdate(name = f"E2E renamed {RUN}"), db)
-        check("admin can edit the event", renamed["name"] == f"E2E renamed {RUN}")
-        await expect_http("an admin can't sign up to play", svc.register(a_uids[0], oid, Registration(email = "p@example.com"), db), 409)
-        await expect_http("admin can't delete the event", svc.delete_event(a_uids[0], oid, db), 404)
-        await expect_http("admin can't add admins", svc.invite_admin(a_uids[0], oid, AdminInvite(profile = b_players[0].public_id), db), 404)
-        public = await svc.get_event(oid, b_uids[0], db)
-        check("outsiders don't see the admin list", public["admins"] == [] and not public["canManage"])
-        ev2 = await svc.invite_admin(host_uid, oid, AdminInvite(profile = b_players[0].public_id), db)
-        await expect_http("can't invite twice", svc.invite_admin(host_uid, oid, AdminInvite(profile = b_players[0].public_id), db), 409)
-        await expect_http("only player profiles can be admins", svc.invite_admin(host_uid, oid, AdminInvite(profile = host.public_id), db), 404)
-        b_invite = next(x for x in ev2["admins"] if x["username"] == b_players[0].username)
-        await svc.respond_admin_invite(b_uids[0], uuid.UUID(b_invite["id"]), False, db)
-        check("declined invite is gone", [x["username"] for x in (await svc.get_event(oid, host_uid, db))["admins"]] == [a_players[0].username])
-        a_admin = (await svc.get_event(oid, host_uid, db))["admins"][0]
-        await svc.remove_admin(a_uids[0], oid, uuid.UUID(a_admin["id"]), db)
-        await expect_http("admin who stepped down loses access", svc.update_event(a_uids[0], oid, EventUpdate(name = "x"), db), 404)
+        await svc.invite_admin(host_uid, eid, AdminInvite(profile = adm.public_id), db)
+        invites = await svc.my_admin_invites(adm_uid, db)
+        check("invite is the bell item", len(invites) == 1 and len(await notes(db, adm_uid, "admin_invite")) == 0)
+        await svc.respond_admin_invite(adm_uid, uuid.UUID(invites[0]["id"]), True, db)
+        as_admin = await svc.get_event(eid, adm_uid, db)
+        check("admin manages but isn't the host", as_admin["canManage"] and not as_admin["isHost"])
+        await expect_http(db, "admin can't delete the event", svc.delete_event(adm_uid, eid, db), 404)
 
-async def backdate_match_start(db, public_id: str, match_id: str, minutes: int) -> None:
-    """
-    Moves a match's start (when it became playable) back, so its no-show window has passed.
-    """
+        print("sign-ups")
+        reg = lambda team, players, answers = {"Region": "NA"}: Registration(team_id = team.public_id, players = [pr[x].public_id for x in players],
+                                                                            email = "cap@example.com", answers = answers)
+        await expect_http(db, "required question enforced", svc.register(uid["a0"], eid, reg(team_a, ["a0", "a1"], {}), db), 422)
+        await expect_http(db, "select answer must be an option", svc.register(uid["a0"], eid, reg(team_a, ["a0", "a1"], {"Region": "Mars"}), db), 422)
+        await expect_http(db, "unknown answers refused", svc.register(uid["a0"], eid, reg(team_a, ["a0", "a1"], {"Region": "NA", "Shoe": "9"}), db), 422)
+        await expect_http(db, "a non-captain can't enter the team", svc.register(uid["a2"], eid, reg(team_a, ["a0", "a1"]), db), 403)
+        await expect_http(db, "players must be on the team", svc.register(uid["a0"], eid, reg(team_a, ["a0", "b1"]), db), 422)
+        ev = await svc.register(uid["a0"], eid, reg(team_a, ["a0", "a1"]), db)
+        check("Alpha signed up with its two picked players", entrant(ev, team_a)["status"] == "signed_up" and entrant(ev, team_a)["rosterSize"] == 2)
+        await expect_http(db, "a player can't play for two entrants", svc.register(uid["b0"], eid, reg(team_b, ["b0", "a1"]), db), 409)
+        ev = await svc.register(uid["b0"], eid, reg(team_b, ["b0"]), db)
+        check("Bravo pending with one of two players", entrant(ev, team_b)["status"] == "pending")
+        ev = await svc.set_players(uid["b0"], eid, [pr["b0"].public_id, pr["b1"].public_id], db)
+        check("the captain fills the roster: signed up", entrant(ev, team_b)["status"] == "signed_up")
+        await expect_http(db, "a team that doesn't play the game can't enter", svc.register(uid["c0"], eid, reg(team_c, ["c0", "c1"]), db), 409)
+        await team_svc.update_team(uid["c0"], team_c.public_id, TeamUpdate(games = ["valorant", "halo"]), db)
+        await svc.register(uid["c0"], eid, reg(team_c, ["c0", "c1"]), db)
+        await svc.register(uid["d0"], eid, reg(team_d, ["d0", "d1"]), db)
+        ev = await svc.register(uid["e0"], eid, reg(team_e, ["e0", "e1"]), db)
+        check("event full: Echo waits as pending", entrant(ev, team_e)["status"] == "pending")
+        await expect_http(db, "an admin can't sign up to play", svc.register(adm_uid, eid, Registration(email = "x@example.com", answers = {"Region": "NA"}), db), 409)
+        clash = await svc.create_event(host_uid, event_body(host, "Clash", team_size = "1v1"), db)
+        await expect_http(db, "no two events at the exact same start", svc.register(uid["a0"], clash["id"], Registration(email = "x@example.com"), db), 409)
+        await expect_http(db, "an admin's not invited while signed up", svc.invite_admin(host_uid, eid, AdminInvite(profile = pr["c1"].public_id), db), 409)
 
-    event = (await db.execute(select(BracketEvents).where(BracketEvents.public_id == public_id))).scalars().one()
-    ready = dict(event.bracket["readyAt"][match_id])
-    ready["at"] = (datetime.fromisoformat(ready["at"]) - timedelta(minutes = minutes)).isoformat()
-    event.bracket = {**event.bracket, "readyAt": {**event.bracket["readyAt"], match_id: ready}}
-    await db.commit()
+        print("privacy")
+        anon = await svc.get_event(eid, None, db)
+        check("public payload hides payment email and sign-up emails", "notifyEmail" not in anon["payments"] and all(e.get("email") is None for e in anon["entrants"]))
+        own = await svc.get_event(eid, uid["a0"], db)
+        check("the captain sees their own entry's email", entrant(own, team_a)["email"] == "cap@example.com")
+        teammate = await svc.get_event(eid, uid["a2"], db)
+        check("a teammate sees the entry but can't act", teammate["viewerEntrantId"] == entrant(own, team_a)["id"] and not teammate["viewerCanAct"])
+
+        print("seeding and publishing")
+        ids = {t.name: entrant(ev, t)["id"] for t in (team_a, team_b, team_c, team_d)}
+        ev = await svc.save_draft(host_uid, eid, [ids[team_a.name], ids[team_b.name], ids[team_c.name], ids[team_d.name]], db)
+        check("draft preview built by the server", ev["bracket"]["status"] == "draft" and len(ev["bracket"]["built"]["rounds"]) == 2)
+        check("the public can't see the draft", (await svc.get_event(eid, None, db))["bracket"] is None)
+        await svc.unregister(uid["d0"], eid, db)
+        ev = await svc.get_event(eid, host_uid, db)
+        check("Delta withdrew; Echo moved up", entrant(ev, team_e)["status"] == "signed_up")
+        await expect_http(db, "publish refuses a stale draft and rebuilds it", svc.publish(host_uid, eid, db), 409)
+        ev = await svc.get_event(eid, host_uid, db)
+        check("rebuilt draft has Echo in Delta's place", entrant(ev, team_e)["id"] in ev["bracket"]["seeds"] and len(ev["bracket"]["seeds"]) == 4)
+        ev = await svc.publish(adm_uid, eid, db)
+        check("published by an admin; sign-ups closed", ev["stage"] == "live" and not ev["registrationOpen"])
+        await expect_http(db, "event roster locked once live", svc.set_players(uid["a0"], eid, [pr["a0"].public_id, pr["a2"].public_id], db), 409)
+        await team_svc.remove_member(uid["b0"], team_b.public_id, pr["b2"].public_id, db)
+        check("the team itself never freezes", True)
+        A, B, C, E = (entrant(ev, t)["id"] for t in (team_a, team_b, team_c, team_e))
+        r0m0, r0m1 = match(ev, "r0m0"), match(ev, "r0m1")
+        check("seed 1 v 4 and 2 v 3", (r0m0["a"], r0m0["b"]) == (A, E) and (r0m1["a"], r0m1["b"]) == (B, C))
+        check("both sides told about their match", len(await notes(db, uid["e1"], "match_ready")) == 1)
+
+        print("reporting")
+        await expect_http(db, "Bo3 can't end 3-0", svc.report(uid["a0"], eid, "r0m0", MatchScore(score_a = 3, score_b = 0), db), 422)
+        await expect_http(db, "a non-captain can't report", svc.report(uid["a1"], eid, "r0m0", MatchScore(score_a = 2, score_b = 1), db), 403)
+        await svc.report(uid["a0"], eid, "r0m0", MatchScore(score_a = 2, score_b = 1), db)
+        check("Echo told to confirm", len(await notes(db, uid["e0"], "opponent_reported")) == 1)
+        ev = await svc.report(uid["e0"], eid, "r0m0", MatchScore(score_a = 2, score_b = 1), db)
+        check("agreeing reports decide it; Alpha advances", match(ev, "r0m0")["winner"] == A and match(ev, "r1m0")["a"] == A)
+
+        await svc.report(uid["b0"], eid, "r0m1", MatchScore(score_a = 2, score_b = 0), db)
+        ev = await svc.report(uid["c0"], eid, "r0m1", MatchScore(score_a = 0, score_b = 2), db)
+        check("disagreeing reports dispute it", ev["bracket"]["matches"]["r0m1"]["state"] == "disputed")
+        check("both sides' players told", len(await notes(db, uid["b1"], "score_disputed")) == 1 and len(await notes(db, uid["c1"], "score_disputed")) == 1)
+        check("host and admin told", len(await notes(db, host_uid, "issue_opened")) == 1 and len(await notes(db, adm_uid, "issue_opened")) == 1)
+        await expect_http(db, "no more reports while disputed", svc.report(uid["b0"], eid, "r0m1", MatchScore(score_a = 2, score_b = 0), db), 409)
+
+        print("admin queue")
+        q = await queue_svc.queue(host_uid, eid, db)
+        dispute_id = uuid.UUID(q["open"][0]["id"])
+        check("the dispute is in the queue", q["open"][0]["type"] == "dispute")
+        claimed = await queue_svc.claim(host_uid, eid, dispute_id, db)
+        check("go to issue returns the match", claimed["matchId"] == "r0m1")
+        await expect_http(db, "a second claim is refused", queue_svc.claim(adm_uid, eid, dispute_id, db), 409)
+        await backdate(db, EventIssues, EventIssues.id == dispute_id, claimed_at = NOW - timedelta(minutes = 11))
+        await queue_svc.housekeep(db)
+        await db.commit()
+        q = await queue_svc.queue(adm_uid, eid, db)
+        check("a claim left 10 minutes goes back to open", q["open"][0]["status"] == "open")
+        await queue_svc.claim(adm_uid, eid, dispute_id, db)
+        await queue_svc.dismiss(host_uid, eid, dispute_id, db)
+        await expect_http(db, "after a dismissal, claims are told it's resolved", queue_svc.claim(adm_uid, eid, dispute_id, db), 409)
+        await expect_http(db, "a non-manager can't see the queue", queue_svc.queue(uid["a0"], eid, db), 404)
+        ev = await svc.rule(adm_uid, eid, "r0m1", Ruling(action = "award", score_a = 2, score_b = 0), db)
+        check("an admin's ruling decides it; Bravo to the final", match(ev, "r1m0")["b"] == B and match(ev, "r0m1")["ruled"])
+        await expect_http(db, "rulings can't be disputed", svc.dispute(uid["c0"], eid, "r0m1", db), 409)
+
+        print("dispute after advancing")
+        ev = await svc.dispute(uid["e0"], eid, "r0m0", db)
+        check("Echo disputes within 5 minutes: the final is frozen", ev["bracket"]["built"]["rounds"][1][0]["locked"])
+        await expect_http(db, "a side can only dispute once", svc.dispute(uid["e0"], eid, "r0m0", db), 409)
+        await expect_http(db, "no reporting on a frozen match", svc.report(uid["a0"], eid, "r1m0", MatchScore(score_a = 3, score_b = 0), db), 409)
+        ev = await svc.rule(host_uid, eid, "r0m0", Ruling(action = "award", score_a = 1, score_b = 2), db)
+        check("awarding Echo swaps it into the final", match(ev, "r1m0")["a"] == E and not match(ev, "r1m0")["locked"])
+        decisions = await svc.decisions(host_uid, eid, db)
+        ev = await svc.revert(host_uid, eid, uuid.UUID(decisions[0]["id"]), db)
+        check("reverting the ruling puts Alpha back", match(ev, "r1m0")["a"] == A)
+        check("the final uses the finals best of", match(ev, "r1m0")["bestOf"] == 5)
+
+        print("final")
+        await expect_http(db, "Bo5 final can't end 2-0", svc.report(uid["a0"], eid, "r1m0", MatchScore(score_a = 2, score_b = 0), db), 422)
+        await svc.report(uid["a0"], eid, "r1m0", MatchScore(score_a = 3, score_b = 1), db)
+        ev = await svc.report(uid["b0"], eid, "r1m0", MatchScore(score_a = 3, score_b = 1), db)
+        check("bracket complete with placings", ev["stage"] == "complete" and ev["bracket"]["built"]["placements"][0] == A)
+        await expect_http(db, "a decided match feeding a played one can't be changed", svc.rule(host_uid, eid, "r0m0", Ruling(action = "clear"), db), 409)
+        page = await svc.entered_events(uid["a2"], db)
+        card = next(x for x in page["events"] if x["id"] == eid)
+        check("summary shows the winner and the viewer's place", card["winner"] == team_a.name and card["viewerPlace"] == 1)
+
+        print("one-sided reports, no-shows and minimums (1v1 double elimination)")
+        de = await svc.create_event(host_uid, event_body(host, "DE", team_size = "1v1", format = "double_elim", best_of = 1,
+                                                          no_show_minutes = 5, min_entrants = 3, starts_at = NOW - timedelta(hours = 2)), db)
+        did = de["id"]
+        for k in ("a2", "b2", "c2", "d2"):
+            de = await svc.register(uid[k], did, Registration(email = "p@example.com"), db)
+        seeds = [e["id"] for e in de["entrants"]]
+        await svc.save_draft(host_uid, did, seeds, db)
+        for k in ("c2", "d2"):
+            await svc.unregister(uid[k], did, db)
+        await expect_http(db, "below the minimum: won't start", svc.publish(host_uid, did, db), 409)
+        await svc.register(uid["c2"], did, Registration(email = "p@example.com"), db)
+        await expect_http(db, "field changed: rebuilt for review", svc.publish(host_uid, did, db), 409)
+        de = await svc.publish(host_uid, did, db)
+        ready = next(code for code, v in de["bracket"]["matches"].items() if v["state"] == "ready")
+        first = match(de, ready)
+        mine = {e["id"]: k for e in de["entrants"] for k in ("a2", "b2", "c2") if e["name"] == pr[k].username}
+        a_side, b_side = mine.get(first["a"]), mine.get(first["b"])
+        await svc.report(uid[a_side], did, ready, MatchScore(score_a = 1, score_b = 0), db)
+        bracket_id = (await db.execute(select(Brackets.id).join(BracketEvents).where(BracketEvents.public_id == did))).scalar()
+        m = (await db.execute(select(BracketMatches).where(BracketMatches.bracket_id == bracket_id).where(BracketMatches.code == ready))).scalars().one()
+        await backdate(db, MatchReports, MatchReports.match_id == m.id, created_at = NOW - timedelta(minutes = 6))
+        raised = await match_svc.flag_one_sided_reports(db)
+        await db.commit()
+        check("an unanswered report goes to the queue after 5 minutes", raised == 1)
+        check("not raised twice", await match_svc.flag_one_sided_reports(db) == 0)
+        await svc.report(uid[b_side], did, ready, MatchScore(score_a = 1, score_b = 0), db)
+        q = await queue_svc.queue(host_uid, did, db)
+        check("the other side agreeing closes it", not q["open"] and q["closed"][0]["status"] == "resolved")
+        de = await svc.get_event(did, host_uid, db)
+        lr = next(code for code, v in de["bracket"]["matches"].items() if v["state"] == "ready")
+        lm = match(de, lr)
+        side = mine.get(lm["a"]) or mine.get(lm["b"])
+        await expect_http(db, "no-show not before the window", svc.report_no_show(uid[side], did, lr, db), 409)
+        row = (await db.execute(select(BracketMatches).where(BracketMatches.bracket_id == bracket_id).where(BracketMatches.code == lr))).scalars().one()
+        await backdate(db, BracketMatches, BracketMatches.id == row.id, ready_at = NOW - timedelta(minutes = 6))
+        await svc.report_no_show(uid[side], did, lr, db)
+        q = await queue_svc.queue(host_uid, did, db)
+        check("the no-show is in the queue", q["open"][0]["type"] == "no_show")
+        ev = await svc.rule(host_uid, did, lr, Ruling(action = "award", score_a = 1 if lm["a"] and mine.get(lm["a"]) == side else 0,
+                                                      score_b = 0 if lm["a"] and mine.get(lm["a"]) == side else 1, forfeit = True), db)
+        q = await queue_svc.queue(host_uid, did, db)
+        check("ruling on it resolves the queue item", not q["open"])
+
+        print("swiss keeps its pairings")
+        sw = await svc.create_event(host_uid, event_body(host, "Swiss", team_size = "1v1", format = "swiss", best_of = 1, starts_at = NOW + timedelta(days = 3)), db)
+        sid = sw["id"]
+        for k in ("a0", "b0", "c0", "d0"):
+            sw = await svc.register(uid[k], sid, Registration(email = "p@example.com"), db)
+        await svc.save_draft(host_uid, sid, [e["id"] for e in sw["entrants"]], db)
+        sw = await svc.publish(host_uid, sid, db)
+        for code in ("sw0m0", "sw0m1"):
+            await svc.rule(host_uid, sid, code, Ruling(action = "award", score_a = 1, score_b = 0), db)
+        sw = await svc.get_event(sid, host_uid, db)
+        before = [(m["a"], m["b"]) for m in sw["bracket"]["built"]["rounds"][1]]
+        sw = await svc.rule(host_uid, sid, "sw0m0", Ruling(action = "award", score_a = 0, score_b = 1), db)
+        after = [(m["a"], m["b"]) for m in sw["bracket"]["built"]["rounds"][1]]
+        check("changing round 1 doesn't re-pair round 2", before == after and all(a and b for a, b in after))
+
+        print("double elimination to a grand final reset")
+        d4 = await svc.create_event(host_uid, event_body(host, "DE4", team_size = "1v1", format = "double_elim", best_of = 1, starts_at = NOW + timedelta(days = 4)), db)
+        d4id = d4["id"]
+        for k in ("a0", "b0", "c0", "d0"):
+            d4 = await svc.register(uid[k], d4id, Registration(email = "p@example.com"), db)
+        await svc.save_draft(host_uid, d4id, [e["id"] for e in d4["entrants"]], db)
+        d4 = await svc.publish(host_uid, d4id, db)
+        top = d4["bracket"]["seeds"][0]
+        played = 0
+        while d4["stage"] != "complete" and played < 20:
+            code, view = next((c, v) for c, v in d4["bracket"]["matches"].items() if v["state"] == "ready")
+            m = match(d4, code)
+            # The top seed wins everything except the first grand final, which forces the reset.
+            a_wins = (m["a"] == top) != (code == "gf1")
+            d4 = await svc.rule(host_uid, d4id, code, Ruling(action = "award", score_a = 1 if a_wins else 0, score_b = 0 if a_wins else 1), db)
+            played += 1
+        built = d4["bracket"]["built"]
+        check("the reset is played and the top seed is champion", [m["id"] for m in built["grandFinal"]] == ["gf1", "gf2"]
+              and built["champion"] == top and d4["stage"] == "complete")
+        check("2n - 2 + reset matches for 4 entrants", played == 7)
+
+        print("response models")
+        from app.schemas.brackets import EventOut, EventPage, QueueOut
+        out = EventOut.model_validate(await svc.get_event(eid, host_uid, db)).model_dump(by_alias = True)
+        raw = await svc.get_event(eid, host_uid, db)
+        check("EventOut keeps every field the service sends", set(raw) <= set(out) and out["entrants"][0]["pass"] == raw["entrants"][0]["pass"])
+        check("entrant emails survive the response model", out["entrants"][0]["email"] == raw["entrants"][0]["email"])
+        EventPage.model_validate(await svc.hosting_events(host_uid, db))
+        QueueOut.model_validate(await queue_svc.queue(host_uid, eid, db))
+        check("page and queue models validate", True)
+
+        print("notifications")
+        mine_notes = await list_notifications(uid["a0"], db)
+        await mark_read(uid["a0"], [uuid.UUID(mine_notes[0]["id"])], db)
+        await backdate(db, Notifications, Notifications.id == uuid.UUID(mine_notes[0]["id"]), read_at = NOW - timedelta(days = 91))
+        removed = await delete_old_read(db)
+        await db.commit()
+        check("read notifications deleted after 90 days", removed >= 1)
+
+        print("paging")
+        first_page = await svc.hosting_events(host_uid, db, limit = 2)
+        second = await svc.hosting_events(host_uid, db, first_page["nextCursor"], 2)
+        ids_seen = [x["id"] for x in first_page["events"] + second["events"]]
+        check("pages don't repeat and continue with a cursor", len(set(ids_seen)) == len(ids_seen) == 4 and first_page["nextCursor"])
+
+        print("team ownership on delete")
+        await backdate(db, TeamMembers, (TeamMembers.team_id == team_e.id) & (TeamMembers.profile_id == pr["e1"].id), joined_at = NOW - timedelta(days = 1))
+        teams_left = await team_svc.before_profiles_deleted({pr["e0"].id}, db)
+        await db.execute(delete(Profiles).where(Profiles.id == pr["e0"].id))
+        await team_svc.after_profiles_deleted(teams_left, db)
+        await db.commit()
+        owner = (await db.execute(select(Profiles.username).join(team_svc.Teams, team_svc.Teams.owner_profile_id == Profiles.id)
+                                  .where(team_svc.Teams.id == team_e.id))).scalar()
+        check("the team passes to the earliest joiner", owner == pr["e1"].username)
 
 async def cleanup():
     async with AsyncSessionLocal() as db:
+        await db.rollback()
         if accounts:
             await db.execute(delete(UsersParent).where(UsersParent.id.in_(accounts)))
             await db.commit()
@@ -281,10 +376,15 @@ async def cleanup():
 async def run():
     try:
         await main()
+    except Exception:
+        import traceback
+        traceback.print_exc(limit = 6)
+        failures.append("crashed")
     finally:
         await cleanup()
     print(f"\n{len(failures)} failure(s)")
     for f in failures:
         print(" -", f)
+    sys.exit(1 if failures else 0)
 
 asyncio.run(run())

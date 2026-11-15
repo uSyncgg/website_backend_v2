@@ -31,6 +31,7 @@ from app.routers import brackets
 from app.services import GAMES, STRIPE_SECRET_KEY, EVENT_TYPES
 from app.services.sitemap import get_sitemap_xml
 from app.services.registration_holds import run_hold_sweeper
+from app.services.sweeper import run_bracket_sweeper
 from app.services.events import populate_verified_events_cache, populate_verified_events_type_cache
 
 load_dotenv()
@@ -62,14 +63,16 @@ async def lifespan(app: FastAPI):
         await populate_verified_events_type_cache(db, app.state.verified_cache)
 
     hold_sweeper = asyncio.create_task(run_hold_sweeper(app.state.stripe))
+    bracket_sweeper = asyncio.create_task(run_bracket_sweeper())
 
     yield
 
-    hold_sweeper.cancel()
-    try:
-        await hold_sweeper
-    except asyncio.CancelledError:
-        pass
+    for task in (hold_sweeper, bracket_sweeper):
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     await engine.dispose()
 

@@ -1,6 +1,7 @@
 import uuid
 
-from sqlalchemy import select, update
+from datetime import datetime, timedelta, timezone
+from sqlalchemy import select, update, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.brackets import Notifications
 
@@ -14,11 +15,19 @@ from app.models.brackets import Notifications
 #   match_ready       { event_id, event_name, match_id, opponent }    you have a match to play
 #   opponent_reported { event_id, event_name, match_id, opponent }    the other side reported a score - confirm yours
 #   score_disputed    { event_id, event_name, match_id, opponent }    the two reports disagree; the host decides
-#   no_show_reported  { event_id, event_name, match_id, opponent, against_you }
+#   no_show_reported  { event_id, event_name, match_id, opponent }        you were reported as a no-show
+#   issue_opened      { event_id, event_name, issue_type, label, match_id, summary }   host / admins: something's in the queue
+#   admin_joined      { event_id, event_name, player }                 your admin invite was accepted
+#   team_ownership    { team_id, team_name }                            you now own a team
+#
+# Each user reads only their own rows. The browser gets them live over Supabase Realtime (the
+# notifications_select_own RLS policy), and through GET /notifications on load. Reading or
+# dismissing one marks it read; read notifications are deleted 90 days later.
 #
 # Helpers here only add rows to the session; the caller commits with the rest of its change.
 
 NOTIFICATION_LIMIT = 50
+RETENTION_DAYS = 90
 
 def notify(db: AsyncSession, account_ids, type_: str, data: dict) -> None:
     for account_id in {str(a) for a in account_ids if a}:
@@ -42,7 +51,8 @@ async def mark_read(user_id: str, ids: list[uuid.UUID] | None, db: AsyncSession)
     Marks the given notifications (or all of them when `ids` is None) as read.
     """
 
-    query = update(Notifications).where(Notifications.account_id == user_id).values(read = True)
+    query = update(Notifications).where(Notifications.account_id == user_id).where(Notifications.read.is_(False)) \
+        .values(read = True, read_at = datetime.now(timezone.utc))
 
     if ids is not None:
         query = query.where(Notifications.id.in_(ids))
@@ -51,3 +61,12 @@ async def mark_read(user_id: str, ids: list[uuid.UUID] | None, db: AsyncSession)
     await db.commit()
 
     return await list_notifications(user_id, db)
+
+async def delete_old_read(db: AsyncSession) -> int:
+    """
+    Deletes notifications read more than 90 days ago (the background sweeper; the caller commits).
+    """
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days = RETENTION_DAYS)
+    result = await db.execute(delete(Notifications).where(Notifications.read.is_(True)).where(Notifications.read_at < cutoff))
+    return result.rowcount or 0

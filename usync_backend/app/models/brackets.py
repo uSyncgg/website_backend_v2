@@ -30,9 +30,8 @@ class BracketEvents(Base):
     SQL Alchemy model describing the bracket_events table: an event a host or venue profile runs
     on uSync (a league, LAN or tournament) with its sign-ups and bracket.
 
-    The bracket itself is one JSONB document ({ format, seeds, results, reports, noShows, log,
-    published, generatedAt }) - the same shape the frontend builds from - and is rebuilt into
-    matches by app.services.bracket_engine whenever it's read or changed.
+    The game is a lookup (games / game_titles / game_modes). Its bracket, seeds and matches are
+    their own tables (brackets, bracket_seeds, bracket_matches).
     """
 
     __tablename__ = "bracket_events"
@@ -42,11 +41,8 @@ class BracketEvents(Base):
     host_profile_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("profiles.id", ondelete = "CASCADE"), index = True)
     name: Mapped[str] = mapped_column()
     event_type: Mapped[str] = mapped_column()
-    game: Mapped[str] = mapped_column()
-    game_title: Mapped[str] = mapped_column(default = "", server_default = text("''"))
-    # The lookup-table versions of game / game_title (the strings above are kept until the
-    # services move over, then dropped). The mode is optional; a title only exists for some games.
-    game_id: Mapped[int | None] = mapped_column(SmallInteger, ForeignKey("games.id", ondelete = "RESTRICT"), nullable = True, index = True)
+    # A title only exists for some games. The mode becomes required once modes are seeded.
+    game_id: Mapped[int] = mapped_column(SmallInteger, ForeignKey("games.id", ondelete = "RESTRICT"), index = True)
     game_title_id: Mapped[int | None] = mapped_column(ForeignKey("game_titles.id", ondelete = "RESTRICT"), nullable = True)
     game_mode_id: Mapped[int | None] = mapped_column(ForeignKey("game_modes.id", ondelete = "RESTRICT"), nullable = True)
     format: Mapped[str] = mapped_column(ForeignKey("bracket_formats.key", ondelete = "RESTRICT"))
@@ -69,7 +65,6 @@ class BracketEvents(Base):
     payments: Mapped[dict] = mapped_column(JSONB, default = dict, server_default = text("'{}'::jsonb"))
     signup_form: Mapped[dict] = mapped_column(JSONB, default = dict, server_default = text("'{}'::jsonb"))
     delays: Mapped[list] = mapped_column(JSONB, default = list, server_default = text("'[]'::jsonb"))
-    bracket: Mapped[dict | None] = mapped_column(JSONB, nullable = True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = text("now()"))
 
     __table_args__ = (
@@ -90,23 +85,19 @@ class BracketEntries(Base):
 
     profile_id is the solo player, or for a team the profile that registered it. It's nulled (not
     cascaded) when that profile is deleted, so the entry - and any bracket it's in - survives.
-    `roster` (copied usernames) is superseded by bracket_entry_players and dropped once the
-    services move over.
     """
 
     __tablename__ = "bracket_entries"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
-    event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_events.id", ondelete = "CASCADE"), index = True)
+    event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_events.id", ondelete = "CASCADE", deferrable = True, initially = "DEFERRED"), index = True)
     profile_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("profiles.id", ondelete = "SET NULL"), nullable = True, index = True)
     team_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("teams.id", ondelete = "SET NULL"), nullable = True, index = True)
     name: Mapped[str] = mapped_column()
     status: Mapped[str] = mapped_column(default = "signed_up", server_default = text("'signed_up'"))
-    rating: Mapped[int] = mapped_column(default = 1200, server_default = text("1200"))
     email: Mapped[str] = mapped_column(default = "", server_default = text("''"))
     answers: Mapped[dict] = mapped_column(JSONB, default = dict, server_default = text("'{}'::jsonb"))
     pass_name: Mapped[str | None] = mapped_column(nullable = True)
-    roster: Mapped[list] = mapped_column(JSONB, default = list, server_default = text("'[]'::jsonb"))
     registered_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = text("now()"))
 
     __table_args__ = (
@@ -130,8 +121,8 @@ class BracketEntryPlayers(Base):
     __tablename__ = "bracket_entry_players"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
-    event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_events.id", ondelete = "CASCADE"))
-    entry_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_entries.id", ondelete = "CASCADE"), index = True)
+    event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_events.id", ondelete = "CASCADE", deferrable = True, initially = "DEFERRED"))
+    entry_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_entries.id", ondelete = "CASCADE", deferrable = True, initially = "DEFERRED"), index = True)
     team_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("teams.id", ondelete = "SET NULL"), nullable = True)
     profile_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("profiles.id", ondelete = "SET NULL"), nullable = True, index = True)
     added_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = text("now()"))
@@ -152,7 +143,7 @@ class Brackets(Base):
     __tablename__ = "brackets"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
-    event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_events.id", ondelete = "CASCADE"), unique = True)
+    event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_events.id", ondelete = "CASCADE", deferrable = True, initially = "DEFERRED"), unique = True)
     format: Mapped[str] = mapped_column(ForeignKey("bracket_formats.key", ondelete = "RESTRICT"))
     status: Mapped[str] = mapped_column(default = "draft", server_default = text("'draft'"))
     created_by_profile_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("profiles.id", ondelete = "SET NULL"), nullable = True)
@@ -171,8 +162,8 @@ class BracketSeeds(Base):
 
     __tablename__ = "bracket_seeds"
 
-    bracket_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("brackets.id", ondelete = "CASCADE"), primary_key = True)
-    entry_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_entries.id", ondelete = "CASCADE"), primary_key = True)
+    bracket_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("brackets.id", ondelete = "CASCADE", deferrable = True, initially = "DEFERRED"), primary_key = True)
+    entry_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_entries.id", ondelete = "CASCADE", deferrable = True, initially = "DEFERRED"), primary_key = True)
     seed: Mapped[int] = mapped_column(SmallInteger)
 
     __table_args__ = (
@@ -207,7 +198,7 @@ class BracketMatches(Base):
     __tablename__ = "bracket_matches"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
-    bracket_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("brackets.id", ondelete = "CASCADE"), index = True)
+    bracket_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("brackets.id", ondelete = "CASCADE", deferrable = True, initially = "DEFERRED"), index = True)
     code: Mapped[str] = mapped_column()
     stage: Mapped[str] = mapped_column(default = "main", server_default = text("'main'"))
     round: Mapped[int] = mapped_column(SmallInteger)
@@ -221,6 +212,8 @@ class BracketMatches(Base):
     winner_entry_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("bracket_entries.id", ondelete = "SET NULL"), nullable = True)
     forfeit: Mapped[bool] = mapped_column(default = False, server_default = text("false"))
     locked: Mapped[bool] = mapped_column(default = False, server_default = text("false"))
+    # The current result came from a host / admin ruling. Rulings are final: no post-advancement dispute.
+    ruled: Mapped[bool] = mapped_column(default = False, server_default = text("false"))
     next_match_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("bracket_matches.id", ondelete = "SET NULL"), nullable = True)
     next_slot: Mapped[str | None] = mapped_column(nullable = True)
     loser_next_match_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("bracket_matches.id", ondelete = "SET NULL"), nullable = True)
@@ -250,8 +243,8 @@ class MatchReports(Base):
     __tablename__ = "match_reports"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
-    match_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_matches.id", ondelete = "CASCADE"))
-    entry_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_entries.id", ondelete = "CASCADE"))
+    match_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_matches.id", ondelete = "CASCADE", deferrable = True, initially = "DEFERRED"))
+    entry_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_entries.id", ondelete = "CASCADE", deferrable = True, initially = "DEFERRED"))
     reported_by_profile_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("profiles.id", ondelete = "SET NULL"), nullable = True)
     score_a: Mapped[int] = mapped_column(SmallInteger)
     score_b: Mapped[int] = mapped_column(SmallInteger)
@@ -277,7 +270,7 @@ class MatchDecisions(Base):
     __tablename__ = "match_decisions"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
-    match_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_matches.id", ondelete = "CASCADE"), index = True)
+    match_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_matches.id", ondelete = "CASCADE", deferrable = True, initially = "DEFERRED"), index = True)
     decided_by_profile_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("profiles.id", ondelete = "SET NULL"), nullable = True)
     action: Mapped[str] = mapped_column()
     issue_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("event_issues.id", ondelete = "SET NULL"), nullable = True)
@@ -316,8 +309,8 @@ class EventIssues(Base):
     __tablename__ = "event_issues"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
-    event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_events.id", ondelete = "CASCADE"))
-    match_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("bracket_matches.id", ondelete = "CASCADE"), nullable = True, index = True)
+    event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_events.id", ondelete = "CASCADE", deferrable = True, initially = "DEFERRED"))
+    match_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("bracket_matches.id", ondelete = "CASCADE", deferrable = True, initially = "DEFERRED"), nullable = True, index = True)
     type: Mapped[str] = mapped_column()
     raised_by_entry_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("bracket_entries.id", ondelete = "SET NULL"), nullable = True)
     data: Mapped[dict] = mapped_column(JSONB, default = dict, server_default = text("'{}'::jsonb"))
@@ -348,7 +341,7 @@ class EventIssueActions(Base):
     __tablename__ = "event_issue_actions"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
-    issue_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("event_issues.id", ondelete = "CASCADE"), index = True)
+    issue_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("event_issues.id", ondelete = "CASCADE", deferrable = True, initially = "DEFERRED"), index = True)
     profile_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("profiles.id", ondelete = "SET NULL"), nullable = True)
     action: Mapped[str] = mapped_column()
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = text("now()"))
@@ -367,7 +360,7 @@ class BracketEventAdmins(Base):
     __tablename__ = "bracket_event_admins"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
-    event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_events.id", ondelete = "CASCADE"), index = True)
+    event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_events.id", ondelete = "CASCADE", deferrable = True, initially = "DEFERRED"), index = True)
     profile_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("profiles.id", ondelete = "CASCADE"), index = True)
     status: Mapped[str] = mapped_column(default = "pending", server_default = text("'pending'"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = text("now()"))
