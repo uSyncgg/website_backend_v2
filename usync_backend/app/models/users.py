@@ -26,6 +26,10 @@ class UsersParent(Base):
     email: Mapped[str] = mapped_column()
     verified: Mapped[bool] = mapped_column(default = False, server_default=text("false"))
     default_profile_id: Mapped[uuid.UUID | None] = mapped_column(nullable = True)
+    # Terms of Service acceptance, recorded at registration: which version they agreed to and when
+    # (server time). Null for accounts created before the sign-up checkbox existed.
+    tos_version: Mapped[str | None] = mapped_column(String(32), nullable = True)
+    tos_accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone = True), nullable = True)
 
     __table_args__ = (
         # Two-column FK so the default can only be one of this account's own profiles.
