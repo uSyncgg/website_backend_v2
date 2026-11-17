@@ -1,6 +1,6 @@
 import re
 
-from datetime import date
+from datetime import date, datetime
 from urllib.parse import urlsplit
 from pydantic import BaseModel, model_validator, ConfigDict, StringConstraints, Field, BeforeValidator, AfterValidator, PlainSerializer, EmailStr
 from typing import Any, Literal, ClassVar, Annotated
@@ -15,11 +15,18 @@ PictureSource = Literal["upload", "copy_default"]
 # other_roles is a set (no duplicates) that leaves as a sorted list, so the
 # ARRAY column and API responses get a stable order. Requests only accept the
 # fixed choices; responses take whatever is stored so an old value can't 500.
-# Venue and Organization aren't choices: each is a profile type of its own. ("Team" stays
-# until teams ship as their own feature.)
-OtherRole = Literal["Coach", "Sponsor", "Team", "Viewer", "Other"]
+# Venue and Organization (formerly "Team") aren't choices: each is a profile type of its own.
+OtherRole = Literal["Coach", "Sponsor", "Viewer", "Other"]
 _SORTED = PlainSerializer(sorted, return_type=list[str])
-OtherRolesIn = Annotated[set[OtherRole], _SORTED]
+# "Team" is retired, but the live frontend still offers it until its replacement ships. The
+# backend deploys first, so requests still accept it and it's quietly dropped rather than
+# rejected with a 422. Remove "Team" here once the frontend that never sends it is in production.
+RETIRED_OTHER_ROLES = {"Team"}
+OtherRolesIn = Annotated[
+    set[Literal["Coach", "Sponsor", "Viewer", "Other", "Team"]],
+    AfterValidator(lambda roles: roles - RETIRED_OTHER_ROLES),
+    _SORTED,
+]
 OtherRolesOut = Annotated[set[str], _SORTED]
 
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -153,10 +160,23 @@ class HostDetails(StrictIn):
     host_country: NONEMPTYSTR
     event_types: list[str] | None = None
 
+TEAM_NAME = Annotated[str, StringConstraints(min_length=2, max_length=40)]
+MAX_TEAMS_AT_SIGN_UP = 20
+
+class TeamIn(StrictIn):
+    """
+    A team to create under an org profile. Its name is unique within the org (ignoring case).
+    """
+
+    name: TEAM_NAME
+    # Game keys (GET /brackets/meta): every team plays at least one game.
+    games: list[NONEMPTYSTR] = Field(min_length=1, max_length=10)
+
 class OrgDetails(StrictIn):
     """
     The details of an org profile, sent at sign up or when adding the profile. Its name is the
-    profile's username, so it isn't sent here. `verified` is set by uSync, never by the org.
+    profile's username, so `organization` isn't sent. `verified` is set by uSync, never by the
+    org. `teams` is optional: an org can create its teams now or later from its profile.
     """
 
     org_country: NONEMPTYSTR
@@ -164,6 +184,16 @@ class OrgDetails(StrictIn):
     other_games: str | None = None
     website: Website = None
     contact_email: ContactEmail = None
+    teams: list[TeamIn] = Field(default_factory=list, max_length=MAX_TEAMS_AT_SIGN_UP)
+
+    @model_validator(mode = "after")
+    def unique_team_names(self):
+        names = [t.name.casefold() for t in self.teams]
+
+        if len(names) != len(set(names)):
+            raise ValueError("Each team in an organization needs a different name.")
+
+        return self
 
 class VenueDetails(StrictIn):
     """
@@ -282,12 +312,51 @@ class HostPublic(BaseModel):
 class VenuePublic(BaseModel):
     locations: list[VenueOut] = []
 
+class TeamMemberOut(BaseModel):
+    """
+    A player on a team: their player profile's summary and role ("captain" or "player").
+    """
+
+    public_id: str
+    username: str
+    profile_picture: str | None = None
+    role: str
+
+class TeamInviteOut(BaseModel):
+    id: str
+    public_id: str
+    username: str
+    profile_picture: str | None = None
+    created_at: datetime
+
+class GameRef(BaseModel):
+    key: str
+    name: str
+
+class TeamOut(BaseModel):
+    """
+    A team. `owner` is the profile that runs it (an org, or the player who made it).
+    `invites` (pending only) is only filled in for the owner. `my_role` is the signed in
+    user's place on it ("owner", "captain", "player" or None), where that's known.
+    """
+
+    public_id: str
+    name: str
+    games: list[GameRef] = []
+    picture: str | None = None
+    created_at: datetime
+    owner: "ProfileSummary"
+    my_role: str | None = None
+    members: list[TeamMemberOut] = []
+    invites: list[TeamInviteOut] = []
+
 class OrgPublic(BaseModel):
     organization: str
     verified: bool = False
     games: list[str] = []
     website: str | None = None
     contact_email: str | None = None
+    teams: list[TeamOut] = []
 
 class Profile(BaseModel):
     """
@@ -483,6 +552,46 @@ class DefaultProfileUpdate(StrictIn):
 
     type: ProfileType
 
+class TeamCreate(TeamIn):
+    """
+    POST /teams (the `data` field; the picture is a file alongside). `owner_type` picks which of
+    the account's profiles owns it. `invites` are player usernames to invite straight away.
+    """
+
+    owner_type: ProfileType
+    invites: list[NONEMPTYSTR] = Field(default_factory=list, max_length=20)
+
+class TeamUpdate(Updater):
+    """
+    PATCH /teams/{team_public_id}. `games` replaces the team's games (at least one).
+    """
+
+    never_null: ClassVar[set[str]] = {"name", "games"}
+
+    name: TEAM_NAME | None = None
+    games: list[NONEMPTYSTR] | None = Field(default=None, min_length=1, max_length=10)
+
+class TeamInviteCreate(StrictIn):
+    """
+    POST /teams/{team_public_id}/invites: the player profile's username.
+    """
+
+    username: NONEMPTYSTR
+
+class TeamRoleUpdate(StrictIn):
+    role: Literal["captain", "player"]
+
+class MyTeamInviteOut(BaseModel):
+    """
+    A pending invite as the invited player sees it: the team they'd join (with its roster) and
+    who invited them (the team's owner).
+    """
+
+    id: str
+    team: TeamOut
+    invited_by: "ProfileSummary"
+    created_at: datetime
+
 class UpdateProfileIn(BaseModel):
     """
     Validation class for payload information for the /profile/update endpoint.
@@ -496,3 +605,6 @@ class UpdateProfileOut(BaseModel):
     """
 
     message: str
+
+TeamOut.model_rebuild()
+MyTeamInviteOut.model_rebuild()

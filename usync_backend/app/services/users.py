@@ -1,9 +1,5 @@
 import uuid
 import logging
-import io
-import base64
-import secrets
-import string
 import unicodedata
 import re
 
@@ -12,14 +8,12 @@ from pydantic import ValidationError
 from sqlalchemy import select, insert, update, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException, UploadFile
-from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.exc import IntegrityError
 from app.schemas.users import (
     RegistrationIn,
     RegistrationOut,
     ProfileIn,
     ProfileType,
-    ProfileSummary,
     Me,
     Profile,
     PlayerPublic,
@@ -39,32 +33,30 @@ from app.schemas.users import (
     OrgUpdate
 )
 from app.models.users import UsersParent, Profiles, ProfileLinks, Players, Hosts, Venues, Organizations
-from PIL import Image, ImageOps, UnidentifiedImageError
+from app.services.pictures import PFP_BUCKET, process_pfp, copy_pfp, remove_pfps, storage_path
+from app.services.naming import (
+    new_public_id, normalize_username, canonical_username, split_words, profanity_moderation,
+    openai_text_moderation, profile_summary, get_own_profile, moderate_name
+)
+from app.services.event_claims import PROOF_BUCKET
+from app.models.teams import Teams
+from app.services.teams import new_team, team_game_rows, game_ids_for, org_teams, before_profiles_deleted, after_profiles_deleted
 from supabase import AsyncClient
-from storage3.utils import StorageException
 from supabase_auth.errors import AuthApiError
 from openai import AsyncOpenAI
-from better_profanity import profanity
 
 logger = logging.getLogger(__name__)
 
-MAX_IMAGE_SIZE = 5 * 1024 * 1024
-ACCEPTED_IMAGE_TYPES = {"JPEG", "WEBP", "PNG"}
 ALLOWED_SYMBOLS = {"_", ".", "-"}
 ALLOWED_CHAR_FORMATS = {"‌", "‍"}
 MIN_USER_LEN = 4
 MAX_USER_LEN = 25
 MAX_ORG_NAME_LEN = 40
-# An org's username is its organization name, which can have spaces and run a little longer.
+# Org usernames are their organization name, which can have spaces.
 SPACED_USERNAME_TYPES = {"org"}
-_SPLIT_RE = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Za-z])(?=\d)|(?<=\d)(?=[A-Za-z])")
-
-# public_id goes in profile URLs: random (not sequential, so profiles can't be enumerated) and short.
-PUBLIC_ID_ALPHABET = string.ascii_lowercase + string.digits
-PUBLIC_ID_LENGTH = 10
 
 DETAIL_UPDATES = {"player": PlayerUpdate, "host": HostUpdate, "venue": VenueUpdate, "org": OrgUpdate}
-# Orgs enter events but never run them, so they can't turn on bracket hosting.
+# Orgs run teams and enter events but never post them, so they never host brackets.
 NO_BRACKET_HOSTING = {"org"}
 GAME_ACCOUNT_LABELS = {"battlenet": "Battle.net", "activision": "Activision", "steam": "Steam", "riot": "Riot"}
 LINK_LABELS = {
@@ -73,8 +65,6 @@ LINK_LABELS = {
 }
 _USERNAME_CONFLICT_RE = re.compile(r"\(type, canonical_username\)=\((\w+),")
 _LINK_CONFLICT_RE = re.compile(r"\(platform, canonical_handle, account_id\)=\((\w+),")
-
-profanity.load_censor_words()
 
 def _field_error(loc: tuple, msg: str) -> HTTPException:
     """
@@ -104,6 +94,9 @@ def _raise_conflict(e: IntegrityError, action: str, profile_type: str | None = N
         label = LINK_LABELS.get(match.group(1), "linked") if match else "linked"
         raise HTTPException(status_code=409, detail=f"That {label} account is already linked to another user.")
 
+    if "uq_teams_owner_canonical_name" in message:
+        raise HTTPException(status_code=409, detail="You already have a team with that name.")
+
     if "users_pkey" in message:
         raise HTTPException(status_code=409, detail="Your profile is already set up.")
 
@@ -117,22 +110,20 @@ def _raise_conflict(e: IntegrityError, action: str, profile_type: str | None = N
 def _canonical_handle(handle: str) -> str:
     return unicodedata.normalize("NFKC", handle).casefold()
 
-def _new_public_id() -> str:
-    return "".join(secrets.choice(PUBLIC_ID_ALPHABET) for _ in range(PUBLIC_ID_LENGTH))
-
-def _build_profile(profile: ProfileIn, account_id: str, pfp_url: str | None) -> tuple[Profiles, list[ProfileLinks | Players | Hosts | Venues | Organizations]]:
+def _build_profile(profile: ProfileIn, account_id: str, pfp_url: str | None, game_ids: dict | None = None) -> tuple[Profiles, list]:
     """
-    Builds a profiles row and the rows that hang off it (links and the type's details). The
-    profile's id is set here so the child rows can point at it before anything is flushed.
+    Builds a profiles row and the rows that hang off it (links and the type's details, and an
+    org's teams with their games). The profile's id is set here so the child rows can point at
+    it before anything is flushed. `game_ids` maps game keys to lookup ids (see _game_ids).
     """
 
     row = Profiles(
         id = uuid.uuid4(),
-        public_id = _new_public_id(),
+        public_id = new_public_id(),
         account_id = account_id,
         type = profile.type,
         username = profile.username,
-        canonical_username = _canonical_username(profile.username),
+        canonical_username = canonical_username(profile.username),
         bio = profile.bio,
         profile_picture = pfp_url,
         bracket_hosting = profile.bracket_hosting and profile.type not in NO_BRACKET_HOSTING,
@@ -140,7 +131,7 @@ def _build_profile(profile: ProfileIn, account_id: str, pfp_url: str | None) -> 
         other_role_detail = profile.other_role_detail
     )
 
-    children: list[ProfileLinks | Players | Hosts | Venues | Organizations] = [
+    children: list[ProfileLinks | Players | Hosts | Venues | Organizations | Teams] = [
         ProfileLinks(
             profile_id = row.id,
             account_id = account_id,
@@ -181,14 +172,19 @@ def _build_profile(profile: ProfileIn, account_id: str, pfp_url: str | None) -> 
     elif profile.type == "org":
         children.append(Organizations(
             profile_id = row.id,
-            # The org's name is its username; it's asked for once, on the username step.
-            organization = profile.username,
+            # The org's name is its username; one field at sign up.
+            organization = profile.username.strip(),
             org_country = details.org_country,
             games = details.games,
             other_games = details.other_games,
             website = details.website,
             contact_email = details.contact_email
         ))
+        # Teams picked at sign up (optional). More can be added later from the profile.
+        for team_in in details.teams:
+            team = new_team(row.id, team_in.name)
+            children.append(team)
+            children.extend(team_game_rows(team, [game_ids[k] for k in team_in.games]))
     else:
         # Keyed by name since (profile_id, venue_name) is the primary key.
         unique_locations = {v.name: v.location for v in details.locations}
@@ -211,47 +207,10 @@ async def _insert_profiles(rows: list[tuple[Profiles, list]], db: AsyncSession) 
 
     return None
 
-def _split_normalized(normalized_username: str) -> str:
-    """
-    
-    """
-
-    s = re.sub(r"[_./-]+", " ", normalized_username)
-    return _SPLIT_RE.sub(" ", s)
-
-def profanity_moderation(normalized: str, split: str) -> None:
-    """
-    
-    """
-
-    for candidate in (normalized, split):
-        if profanity.contains_profanity(candidate):
-            raise ValueError("Thise username is not allowed. Please choose another.")
-
-    return None
-
-async def openai_username_moderation(normalized_username: str, split_username: str, openai: AsyncOpenAI) -> None:
-    """
-    
-    """
-
-    response = await openai.moderations.create(
-        model = "omni-moderation-latest",
-        input = [
-            normalized_username,
-            split_username,
-        ],
-    )
-
-    if any(r.flagged for r in response.results):
-        raise ValueError("This username is not allowed. Please choose another.")
-
-    return None
-
 def _check_user_restrictions(canonical_username: str, allow_spaces: bool = False) -> None:
     """
-    Length and character rules. An org's username is its organization name, so it may also have
-    single spaces between words and run up to MAX_ORG_NAME_LEN characters.
+    Length and character rules. An org's username is its organization name, so it may also
+    hold single spaces between words (and be a little longer).
     """
 
     if len(canonical_username) < MIN_USER_LEN:
@@ -277,13 +236,6 @@ def _check_user_restrictions(canonical_username: str, allow_spaces: bool = False
 
     return None
 
-def _normalize_username(username: str) -> str:
-    s = unicodedata.normalize("NFKC", username.strip())
-    return "".join(ch for ch in s if unicodedata.category(ch) != "Cf")
-
-def _canonical_username(username: str) -> str:
-    return _normalize_username(username).casefold()
-
 def _check_display_chars(username: str) -> None:
     for ch in unicodedata.normalize("NFKC", username.strip()):
         if unicodedata.category(ch) == "Cf" and ch not in ALLOWED_CHAR_FORMATS:
@@ -291,122 +243,6 @@ def _check_display_chars(username: str) -> None:
 
     return None
 
-
-def _sanitize_pfp(raw: bytes) -> bytes:
-    """
-    
-    """
-
-    with Image.open(io.BytesIO(raw)) as img:
-        if img.format not in ACCEPTED_IMAGE_TYPES:
-            raise ValueError("unsupported format")
-
-        if img.width * img.height > 25_000_000:
-            raise ValueError("image is too large")
-
-        img = ImageOps.exif_transpose(img).convert("RGBA")
-        img = ImageOps.fit(img, (512, 512), Image.Resampling.LANCZOS)
-        out = io.BytesIO()
-        img.save(out, "WEBP", quality = 85)
-
-        return out.getvalue()
-
-async def deposit_pfp(pfp: bytes, supabase: AsyncClient, user_id: str) -> tuple[str, str]:
-    """
-    
-    """
-
-    path = f"{user_id}/{str(uuid.uuid4())}.webp"
-
-    try:
-        await supabase.storage.from_("profile_pictures").upload(
-            path, pfp, {"content-type": "image/webp", "upsert": "false"}
-        )
-    except StorageException:
-        logger.exception("Profile picture upload failed.")
-        raise HTTPException(502, "Could not save profile picture. Try again.")
-
-    url = await supabase.storage.from_("profile_pictures").get_public_url(path)
-
-    return url, path
-
-async def moderate_pfp(file: bytes, openai: AsyncOpenAI) -> None:
-    """
-    
-    """
-
-    b64 = base64.b64encode(file).decode("ascii")
-
-    response = await openai.moderations.create(
-        model = "omni-moderation-latest",
-        input = [
-            {"type": "image_url", "image_url": {"url": f"data:image/webp;base64,{b64}"}},
-        ],
-    )
-
-    if response.results[0].flagged:
-        raise ValueError("This profile picture is not allowed. Please upload another.")
-
-    return None
-
-async def process_pfp(file: UploadFile, supabase: AsyncClient, user_id: str, openai: AsyncOpenAI) -> tuple[str, str]:
-    """
-    
-    """
-
-    raw = await file.read(MAX_IMAGE_SIZE + 1)
-
-    if len(raw) > MAX_IMAGE_SIZE:
-        raise HTTPException(status_code = 413, detail = "Image size is too large")
-
-    try:
-        pfp = await run_in_threadpool(_sanitize_pfp, raw)
-    except (ValueError, UnidentifiedImageError, Image.DecompressionBombError, OSError):
-        raise HTTPException(422, "Invalid image")
-
-    try:
-        await moderate_pfp(pfp, openai)
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
-
-    pfp_url, pfp_path = await deposit_pfp(pfp, supabase, user_id)
-
-    return pfp_url, pfp_path
-
-
-async def copy_pfp(source_path: str, supabase: AsyncClient, user_id: str) -> tuple[str, str]:
-    """
-    Copies an already moderated picture to a new file, so another profile can use it without
-    moderating it again. Each profile gets its own file, so replacing one profile's picture
-    (which deletes its old file) never breaks another's.
-    """
-
-    path = f"{user_id}/{str(uuid.uuid4())}.webp"
-
-    try:
-        await supabase.storage.from_("profile_pictures").copy(source_path, path)
-    except StorageException:
-        logger.exception("Profile picture copy failed.")
-        raise HTTPException(502, "Could not save profile picture. Try again.")
-
-    url = await supabase.storage.from_("profile_pictures").get_public_url(path)
-
-    return url, path
-
-async def _remove_pfps(paths: list[str], supabase: AsyncClient) -> None:
-    """
-    Best-effort cleanup of pictures uploaded for a request that then failed.
-    """
-
-    if not paths:
-        return None
-
-    try:
-        await supabase.storage.from_("profile_pictures").remove(paths)
-    except Exception:
-        logger.exception("Failed to clean up profile pictures %s", paths)
-
-    return None
 
 def _check_picture_files(profiles: list[ProfileIn], files: dict[str, UploadFile | None], field: str) -> None:
     """
@@ -437,17 +273,35 @@ async def validate_username(username: str, openai: AsyncOpenAI, loc: tuple, prof
     run (including the OpenAI call) without holding a connection.
     """
 
-    normalized = _normalize_username(username)
-    split = _split_normalized(normalized)
-    canonical_username = _canonical_username(username)
+    normalized = normalize_username(username)
+    split = split_words(normalized)
+    canonical = canonical_username(username)
 
     try:
-        _check_user_restrictions(canonical_username, profile_type in SPACED_USERNAME_TYPES)
+        _check_user_restrictions(canonical, profile_type in SPACED_USERNAME_TYPES)
         _check_display_chars(username)
         profanity_moderation(normalized, split)
-        await openai_username_moderation(normalized, split, openai)
+        await openai_text_moderation([normalized, split], openai)
     except ValueError as e:
         raise _field_error(loc, str(e))
+
+    return None
+
+async def _game_ids(profiles: list, db: AsyncSession) -> dict:
+    """
+    {game key: lookup id} for every game the org teams in these profiles play (422 if unknown).
+    """
+
+    keys = sorted({k for p in profiles for t in (getattr(getattr(p, "details", None), "teams", None) or []) for k in t.games})
+    return dict(zip(keys, await game_ids_for(keys, db))) if keys else {}
+
+async def _moderate_team_names(profile: ProfileIn, openai: AsyncOpenAI) -> None:
+    """
+    An org can name its teams at sign up; those names get the same moderation as any team name.
+    """
+
+    for team in getattr(getattr(profile, "details", None), "teams", None) or []:
+        await moderate_name(team.name, openai, "team name")
 
     return None
 
@@ -460,7 +314,7 @@ async def check_username_available(username: str, profile_type: ProfileType, db:
     result = await db.execute(
         select(Profiles.id)
         .where(Profiles.type == profile_type)
-        .where(Profiles.canonical_username == _canonical_username(username))
+        .where(Profiles.canonical_username == canonical_username(username))
     )
 
     if result.first() is not None:
@@ -504,11 +358,14 @@ async def handle_registration(
     for i, profile in enumerate(payload.profiles):
         await check_username_available(profile.username, profile.type, db, ("body", "profiles", i, "username"))
 
+    game_ids = await _game_ids(payload.profiles, db)
+
     # Release the connection before the outside calls below.
     await db.rollback()
 
     for i, profile in enumerate(payload.profiles):
         await validate_username(profile.username, openai, ("body", "profiles", i, "username"), profile.type)
+        await _moderate_team_names(profile, openai)
 
     urls, paths = await _prepare_pictures(payload, files, supabase, user_id, openai)
 
@@ -517,18 +374,18 @@ async def handle_registration(
         db.add(user)
         await db.flush()
 
-        rows = [_build_profile(p, user_id, urls.get(p.type)) for p in payload.profiles]
+        rows = [_build_profile(p, user_id, urls.get(p.type), game_ids) for p in payload.profiles]
         await _insert_profiles(rows, db)
 
         user.default_profile_id = next(row.id for row, _ in rows if row.type == payload.default_profile)
         await db.commit()
     except IntegrityError as e:
         await db.rollback()
-        await _remove_pfps(paths, supabase)
+        await remove_pfps(paths, supabase)
         _raise_conflict(e, "Registration")
     except Exception:
         await db.rollback()
-        await _remove_pfps(paths, supabase)
+        await remove_pfps(paths, supabase)
         raise
 
     return RegistrationOut(message = "Sign up form successfully submitted!")
@@ -557,7 +414,7 @@ async def _prepare_pictures(
             elif profile.picture == "copy_default":
                 urls[profile.type], paths[profile.type] = await copy_pfp(paths[payload.default_profile], supabase, user_id)
     except Exception:
-        await _remove_pfps(list(paths.values()), supabase)
+        await remove_pfps(list(paths.values()), supabase)
         raise
 
     return urls, list(paths.values())
@@ -574,29 +431,6 @@ async def _get_user(user_id: str, db: AsyncSession) -> UsersParent:
         raise HTTPException(status_code=404, detail="Profile not found.")
 
     return user
-
-async def _get_own_profile(user_id: str, profile_type: ProfileType, db: AsyncSession) -> Profiles:
-    """
-    Loads one of the signed in user's profiles by type, or raises a 404 if they don't have one.
-    """
-
-    result = await db.execute(
-        select(Profiles).where(Profiles.account_id == user_id).where(Profiles.type == profile_type)
-    )
-    profile = result.scalars().first()
-
-    if not profile:
-        raise HTTPException(status_code=404, detail=f"You don't have a {profile_type} profile.")
-
-    return profile
-
-def _summary(profile: Profiles) -> ProfileSummary:
-    return ProfileSummary(
-        type = profile.type,
-        username = profile.username,
-        public_id = profile.public_id,
-        profile_picture = profile.profile_picture
-    )
 
 async def _account_profiles(account_id, db: AsyncSession) -> list[Profiles]:
     result = await db.execute(
@@ -631,9 +465,9 @@ async def get_me(user_id: str, db: AsyncSession) -> Me:
         raise HTTPException(status_code=404, detail="Profile not completed.")
 
     profiles = await _account_profiles(user_id, db)
-    default = next((_summary(p) for p in profiles if p.id == user.default_profile_id), None)
+    default = next((profile_summary(p) for p in profiles if p.id == user.default_profile_id), None)
 
-    return Me(verified = user.verified, default_profile = default, profiles = [_summary(p) for p in profiles])
+    return Me(verified = user.verified, default_profile = default, profiles = [profile_summary(p) for p in profiles])
 
 async def get_profile(public_id: str, db: AsyncSession) -> Profile:
     """
@@ -670,12 +504,13 @@ async def get_profile(public_id: str, db: AsyncSession) -> Profile:
             verified = org.verified,
             games = _without_other(org.games),
             website = org.website,
-            contact_email = org.contact_email
+            contact_email = org.contact_email,
+            teams = await org_teams(profile.id, db, include_invites = False)
         )
     else:
         details = VenuePublic(locations = await _locations(profile.id, db))
 
-    others = [_summary(p) for p in await _account_profiles(profile.account_id, db) if p.id != profile.id]
+    others = [profile_summary(p) for p in await _account_profiles(profile.account_id, db) if p.id != profile.id]
 
     return Profile(
         public_id = profile.public_id,
@@ -789,6 +624,7 @@ async def add_profile(
         raise HTTPException(status_code=409, detail=f"You already have a {profile.type} profile.")
 
     await check_username_available(profile.username, profile.type, db, ("body", "username"))
+    game_ids = await _game_ids([profile], db)
 
     default_picture = None
 
@@ -796,13 +632,14 @@ async def add_profile(
         result = await db.execute(select(Profiles.profile_picture).where(Profiles.id == user.default_profile_id))
         default_picture = result.scalar_one_or_none()
 
-        if not default_picture or not _storage_path(default_picture):
+        if not default_picture or not storage_path(default_picture):
             raise _field_error(("body", "picture"), "Your default profile has no picture to copy.")
 
     # Release the connection before the outside calls below.
     await db.rollback()
 
     await validate_username(profile.username, openai, ("body", "username"), profile.type)
+    await _moderate_team_names(profile, openai)
 
     pfp_url = None
     pfp_path = None
@@ -810,20 +647,20 @@ async def add_profile(
     if profile.picture == "upload":
         pfp_url, pfp_path = await process_pfp(file, supabase, user_id, openai)
     elif profile.picture == "copy_default":
-        pfp_url, pfp_path = await copy_pfp(_storage_path(default_picture), supabase, user_id)
+        pfp_url, pfp_path = await copy_pfp(storage_path(default_picture), supabase, user_id)
 
     paths = [pfp_path] if pfp_path else []
 
     try:
-        await _insert_profiles([_build_profile(profile, user_id, pfp_url)], db)
+        await _insert_profiles([_build_profile(profile, user_id, pfp_url, game_ids)], db)
         await db.commit()
     except IntegrityError as e:
         await db.rollback()
-        await _remove_pfps(paths, supabase)
+        await remove_pfps(paths, supabase)
         _raise_conflict(e, "Adding the profile", profile.type)
     except Exception:
         await db.rollback()
-        await _remove_pfps(paths, supabase)
+        await remove_pfps(paths, supabase)
         raise
 
     return await get_profile_settings(user_id, profile.type, db)
@@ -899,9 +736,9 @@ async def update_profile(user_id: str, profile_type: ProfileType, changes: Profi
             )
 
     if profile_type in NO_BRACKET_HOSTING and payload.get("bracket_hosting"):
-        raise _field_error(("body", "bracket_hosting"), "Organizations can't host brackets. Use a host profile to run events.")
+        raise _field_error(("body", "bracket_hosting"), "Organizations can't host brackets. Use a host profile to post events.")
 
-    profile = await _get_own_profile(user_id, profile_type, db)
+    profile = await get_own_profile(user_id, profile_type, db)
     profile_id = profile.id
 
     # Constraints are checked as each statement runs, so the writes sit inside the try too.
@@ -928,7 +765,7 @@ async def update_profile_picture(
     leaves the profile without a picture.
     """
 
-    profile = await _get_own_profile(user_id, profile_type, db)
+    profile = await get_own_profile(user_id, profile_type, db)
     profile_id = profile.id
     old_url = profile.profile_picture
 
@@ -942,10 +779,10 @@ async def update_profile_picture(
         await db.commit()
     except Exception:
         await db.rollback()
-        await _remove_pfps([pfp_path], supabase)
+        await remove_pfps([pfp_path], supabase)
         raise
 
-    old_path = _storage_path(old_url) if old_url else None
+    old_path = storage_path(old_url) if old_url else None
 
     if old_path and old_path != pfp_path:
         try:
@@ -963,9 +800,9 @@ async def change_username(user_id: str, profile_type: ProfileType, username: str
     released during the moderation call.
     """
 
-    profile = await _get_own_profile(user_id, profile_type, db)
+    profile = await get_own_profile(user_id, profile_type, db)
     profile_id = profile.id
-    canonical = _canonical_username(username)
+    canonical = canonical_username(username)
     loc = ("body", "username")
 
     if canonical == profile.canonical_username:
@@ -985,11 +822,9 @@ async def change_username(user_id: str, profile_type: ProfileType, username: str
         await db.execute(
             update(Profiles).where(Profiles.id == profile_id).values(username = username.strip(), canonical_username = canonical)
         )
-        # An org's name is its username, so renaming one renames the other (same transaction).
+        # An org's name is its username, so renaming one renames the other.
         if profile_type == "org":
-            await db.execute(
-                update(Organizations).where(Organizations.profile_id == profile_id).values(organization = username.strip())
-            )
+            await db.execute(update(Organizations).where(Organizations.profile_id == profile_id).values(organization = username.strip()))
         await db.commit()
     except IntegrityError as e:
         await db.rollback()
@@ -1002,7 +837,7 @@ async def set_default_profile(user_id: str, profile_type: ProfileType, db: Async
     Makes one of the user's profiles their default (navbar picture and name, first view).
     """
 
-    profile = await _get_own_profile(user_id, profile_type, db)
+    profile = await get_own_profile(user_id, profile_type, db)
 
     await db.execute(update(UsersParent).where(UsersParent.id == user_id).values(default_profile_id = profile.id))
     await db.commit()
@@ -1025,7 +860,7 @@ async def delete_profile(user_id: str, profile_type: ProfileType, db: AsyncSessi
     if not user:
         raise HTTPException(status_code=404, detail="Profile not found.")
 
-    profile = await _get_own_profile(user_id, profile_type, db)
+    profile = await get_own_profile(user_id, profile_type, db)
     remaining = [p for p in await _account_profiles(user_id, db) if p.id != profile.id]
 
     if not remaining:
@@ -1041,28 +876,18 @@ async def delete_profile(user_id: str, profile_type: ProfileType, db: AsyncSessi
             update(UsersParent).where(UsersParent.id == user_id).values(default_profile_id = remaining[0].id)
         )
 
-    pfp_path = _storage_path(profile.profile_picture) if profile.profile_picture else None
+    pfp_path = storage_path(profile.profile_picture) if profile.profile_picture else None
 
+    # Teams it owns pass to another player instead of being deleted with it.
+    teams_losing_a_member = await before_profiles_deleted({profile.id}, db)
     await db.execute(delete(Profiles).where(Profiles.id == profile.id).where(Profiles.account_id == user_id))
+    await after_profiles_deleted(teams_losing_a_member, db)
     await db.commit()
 
     # After the commit, so a failed delete never leaves a profile without its picture.
-    await _remove_pfps([pfp_path] if pfp_path else [], supabase)
+    await remove_pfps([pfp_path] if pfp_path else [], supabase)
 
     return await get_me(user_id, db)
-
-def _storage_path(pfp_url: str) -> str | None:
-    """
-    Turns a profile_pictures public URL back into its storage path (<user_id>/<uuid>.webp).
-    """
-
-    marker = "/profile_pictures/"
-
-    if marker not in pfp_url:
-        return None
-
-    return pfp_url.split(marker, 1)[1].split("?", 1)[0]
-
 
 async def delete_account(user_id: str, db: AsyncSession, supabase: AsyncClient) -> None:
     """
@@ -1072,7 +897,11 @@ async def delete_account(user_id: str, db: AsyncSession, supabase: AsyncClient) 
     Every step is safe to retry: a missing users row just deletes nothing.
     """
 
+    # Teams the account owns pass to another player instead of being deleted with it.
+    profile_ids = set((await db.execute(select(Profiles.id).where(Profiles.account_id == user_id))).scalars().all())
+    teams_losing_a_member = await before_profiles_deleted(profile_ids, db)
     await db.execute(delete(UsersParent).where(UsersParent.id == user_id))
+    await after_profiles_deleted(teams_losing_a_member, db)
     await db.commit()
 
     try:
@@ -1086,13 +915,15 @@ async def delete_account(user_id: str, db: AsyncSession, supabase: AsyncClient) 
         logger.exception("Failed to delete auth user %s", user_id)
         raise HTTPException(status_code=500, detail="Could not finish deleting your account. Please try again.")
 
-    try:
-        files = await supabase.storage.from_("profile_pictures").list(user_id)
-        paths = [f"{user_id}/{f['name']}" for f in files]
+    # Each bucket keeps a user's files under a <user_id>/ folder.
+    for bucket in (PFP_BUCKET, PROOF_BUCKET):
+        try:
+            files = await supabase.storage.from_(bucket).list(user_id)
+            paths = [f"{user_id}/{f['name']}" for f in files]
 
-        if paths:
-            await supabase.storage.from_("profile_pictures").remove(paths)
-    except Exception:
-        logger.exception("Failed to remove stored files for deleted user %s", user_id)
+            if paths:
+                await supabase.storage.from_(bucket).remove(paths)
+        except Exception:
+            logger.exception("Failed to remove stored %s files for deleted user %s", bucket, user_id)
 
     return None

@@ -130,7 +130,8 @@ class Hosts(Base):
 
 class Organizations(Base):
     """
-    SQL Alchemy model describing the organizations table: the details of an org profile.
+    SQL Alchemy model describing the organizations table: the details of an org profile. An org
+    runs teams (app.models.teams) and enters them in events, but doesn't post events itself.
     `organization` mirrors the profile's username (an org's name is its username); it's kept in
     step whenever the username changes. `verified` is set by uSync, never by the org.
     """
@@ -142,6 +143,8 @@ class Organizations(Base):
     org_country: Mapped[str] = mapped_column()
     games: Mapped[list[str]] = mapped_column(ARRAY(String), default = [], nullable = True)
     other_games: Mapped[str | None] = mapped_column(nullable = True)
+    # Added by migration f8d2b6c41a07 (shipped on main with the org profile fix). `verified` is
+    # set by uSync, never by the org.
     verified: Mapped[bool] = mapped_column(default = False, server_default = text("false"))
     website: Mapped[str | None] = mapped_column(nullable = True)
     contact_email: Mapped[str | None] = mapped_column(nullable = True)
