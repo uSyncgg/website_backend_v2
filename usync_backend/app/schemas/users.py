@@ -1,7 +1,8 @@
 import re
 
 from datetime import date, datetime
-from pydantic import BaseModel, model_validator, ConfigDict, StringConstraints, Field, BeforeValidator, AfterValidator, PlainSerializer
+from urllib.parse import urlsplit
+from pydantic import BaseModel, model_validator, ConfigDict, StringConstraints, Field, BeforeValidator, AfterValidator, PlainSerializer, EmailStr
 from typing import Any, Literal, ClassVar, Annotated
 
 NONEMPTYSTR = Annotated[str, StringConstraints(min_length=1)]
@@ -74,6 +75,43 @@ def _clean_handle(value: Any) -> Any:
 # A linked account handle, stored without a leading @ (so "@SamTV" and "SamTV" are the same).
 LinkHandle = Annotated[str, BeforeValidator(_clean_handle), StringConstraints(min_length=1)]
 
+MAX_WEBSITE_LEN = 2048
+
+def _clean_website(value: Any) -> Any:
+    """
+    An org's website. Blank means "none". A bare domain ("example.gg") gets https:// in front;
+    anything else must be an http(s) URL with a real host, so a javascript: link can't get in.
+    """
+
+    if not isinstance(value, str):
+        return value
+
+    value = value.strip()
+
+    if value == "":
+        return None
+
+    if "://" not in value:
+        value = f"https://{value}"
+
+    try:
+        parts = urlsplit(value)
+        host = parts.hostname
+    except ValueError:
+        host = None
+
+    if host is None or "." not in host or parts.scheme.lower() not in ("http", "https"):
+        raise ValueError("Enter a website address like https://example.gg.")
+
+    if len(value) > MAX_WEBSITE_LEN:
+        raise ValueError("That website address is too long.")
+
+    return value
+
+Website = Annotated[str | None, BeforeValidator(_clean_website)]
+# A blank contact email means "none".
+ContactEmail = Annotated[EmailStr | None, BeforeValidator(_blank_to_none)]
+
 # Game account IDs are unique across players, so a blank one is stored as NULL (Postgres
 # allows any number of NULLs in a unique column, but only one "").
 GameAccount = Annotated[str | None, BeforeValidator(_blank_to_none)]
@@ -137,13 +175,15 @@ class TeamIn(StrictIn):
 class OrgDetails(StrictIn):
     """
     The details of an org profile, sent at sign up or when adding the profile. Its name is the
-    profile's username, so `organization` isn't sent. `teams` is optional: an org can create
-    its teams now or later from its profile.
+    profile's username, so `organization` isn't sent. `verified` is set by uSync, never by the
+    org. `teams` is optional: an org can create its teams now or later from its profile.
     """
 
     org_country: NONEMPTYSTR
     games: list[str] | None = None
     other_games: str | None = None
+    website: Website = None
+    contact_email: ContactEmail = None
     teams: list[TeamIn] = Field(default_factory=list, max_length=MAX_TEAMS_AT_SIGN_UP)
 
     @model_validator(mode = "after")
@@ -312,7 +352,10 @@ class TeamOut(BaseModel):
 
 class OrgPublic(BaseModel):
     organization: str
+    verified: bool = False
     games: list[str] = []
+    website: str | None = None
+    contact_email: str | None = None
     teams: list[TeamOut] = []
 
 class Profile(BaseModel):
@@ -359,9 +402,12 @@ class VenueSettings(BaseModel):
 
 class OrgSettings(BaseModel):
     organization: str
+    verified: bool = False
     org_country: str
     games: list[str] = []
     other_games: str | None = None
+    website: str | None = None
+    contact_email: str | None = None
 
 class ProfileSettingsOut(BaseModel):
     """
@@ -459,17 +505,19 @@ class VenueUpdate(Updater):
 
 class OrgUpdate(Updater):
     """
-
+    Partial update of an org's details. The name changes with the username
+    (PATCH /me/profiles/org/username), and `verified` can't be changed by the org.
     """
 
     never_null: ClassVar[set[str]] = {
         "org_country"
     }
 
-    # The name changes with the username (PATCH .../org/username), not here.
     org_country: NONEMPTYSTR | None = None
     games: list[str] | None = None
     other_games: str | None = None
+    website: Website = None
+    contact_email: ContactEmail = None
 
 class ProfileUpdate(Updater):
     """

@@ -176,7 +176,9 @@ def _build_profile(profile: ProfileIn, account_id: str, pfp_url: str | None, gam
             organization = profile.username.strip(),
             org_country = details.org_country,
             games = details.games,
-            other_games = details.other_games
+            other_games = details.other_games,
+            website = details.website,
+            contact_email = details.contact_email
         ))
         # Teams picked at sign up (optional). More can be added later from the profile.
         for team_in in details.teams:
@@ -499,7 +501,10 @@ async def get_profile(public_id: str, db: AsyncSession) -> Profile:
         org = (await db.execute(select(Organizations).where(Organizations.profile_id == profile.id))).scalars().one()
         details = OrgPublic(
             organization = org.organization,
+            verified = org.verified,
             games = _without_other(org.games),
+            website = org.website,
+            contact_email = org.contact_email,
             teams = await org_teams(profile.id, db, include_invites = False)
         )
     else:
@@ -568,9 +573,12 @@ async def get_profile_settings(user_id: str, profile_type: ProfileType, db: Asyn
         org = (await db.execute(select(Organizations).where(Organizations.profile_id == profile.id))).scalars().one()
         details = OrgSettings(
             organization = org.organization,
+            verified = org.verified,
             org_country = org.org_country,
             games = org.games or [],
-            other_games = org.other_games
+            other_games = org.other_games,
+            website = org.website,
+            contact_email = org.contact_email
         )
     else:
         details = VenueSettings(locations = await _locations(profile.id, db))
@@ -839,7 +847,7 @@ async def set_default_profile(user_id: str, profile_type: ProfileType, db: Async
 async def delete_profile(user_id: str, profile_type: ProfileType, db: AsyncSession, supabase: AsyncClient) -> Me:
     """
     Deletes one of the user's profiles. Removing the profiles row cascades to its players/hosts/
-    venues details, links and comp site accounts. The account's only profile can't be deleted
+    venues/organizations details, links and comp site accounts. The account's only profile can't be deleted
     (409, delete the account instead). If it was the default, the oldest remaining profile
     becomes the default first, since the default_profile FK won't let it point at a deleted row.
     """
