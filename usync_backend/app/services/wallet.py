@@ -34,6 +34,9 @@ logger = logging.getLogger(__name__)
 # first, then Earnings - and freezes the wallet if that leaves it below zero. Winning the dispute
 # (charge.dispute.funds_reinstated) puts it back and thaws the wallet once it's clear.
 
+# Deposit ids are derived from the browser's idempotency key (see start_deposit).
+DEPOSIT_ID_NAMESPACE = uuid.UUID("8f1c2b6e-3d4a-4e5f-9a7b-1c2d3e4f5a6b")
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -96,15 +99,37 @@ async def history(user_id: str, db: AsyncSession, before: int | None = None, lim
 
 # ---- deposits ----------------------------------------------------------------------------
 
-async def start_deposit(user_id: str, amount_cents: int, db: AsyncSession, stripeClient: StripeClient) -> dict:
+def _deposit_out(deposit: Deposits, client_secret: str | None) -> dict:
+    return {
+        "depositId": str(deposit.id),
+        "clientSecret": client_secret,
+        "amountCents": deposit.amount_cents,
+        "feeCents": deposit.fee_cents,
+        "totalCents": deposit.amount_cents + deposit.fee_cents,
+        "status": deposit.status,
+    }
+
+async def start_deposit(user_id: str, amount_cents: int, idempotency_key: str, db: AsyncSession, stripeClient: StripeClient) -> dict:
     """
-    Makes a pending deposit and its PaymentIntent (amount + fee). The wallet row is locked so two
+    Makes a pending deposit and its PaymentIntent (amount + fee). Idempotent: the browser sends
+    one key per deposit dialog, and the same key always returns the same deposit and
+    PaymentIntent, so a retried or double-submitted request never makes a second one. The
+    deposit id is derived from the key, and Stripe gets the same idempotency key, so even a crash
+    between Stripe and our COMMIT ends with one PaymentIntent. The wallet row is locked so two
     deposits started at once can't both slip under the daily limit.
     """
 
     if amount_cents < DEPOSIT_MIN_CENTS:
         raise HTTPException(status_code=422, detail=f"The minimum deposit is {_money(DEPOSIT_MIN_CENTS)}.")
     wallet = await ledger.wallet_of(user_id, db, lock = True)
+
+    existing = (await db.execute(select(Deposits).where(Deposits.idempotency_key == idempotency_key))).scalars().first()
+    if existing is not None:
+        if existing.wallet_id != wallet.id or existing.amount_cents != amount_cents:
+            raise HTTPException(status_code=409, detail="This deposit was already started for a different amount. Close it and start again.")
+        intent = await stripeClient.v1.payment_intents.retrieve_async(existing.stripe_payment_intent_id)
+        return _deposit_out(existing, intent.client_secret)
+
     since = _now() - timedelta(hours = 24)
     recent = (await db.execute(
         select(func.coalesce(func.sum(Deposits.amount_cents), 0))
@@ -119,7 +144,7 @@ async def start_deposit(user_id: str, amount_cents: int, db: AsyncSession, strip
         ))
 
     fee = deposit_fee(amount_cents)
-    deposit_id = uuid.uuid4()
+    deposit_id = uuid.uuid5(DEPOSIT_ID_NAMESPACE, f"{wallet.id}:{idempotency_key}")
     intent = await stripeClient.v1.payment_intents.create_async(
         {
             "amount": amount_cents + fee,
@@ -130,16 +155,11 @@ async def start_deposit(user_id: str, amount_cents: int, db: AsyncSession, strip
         },
         {"idempotency_key": f"wallet-deposit-{deposit_id}"},
     )
-    db.add(Deposits(id = deposit_id, wallet_id = wallet.id, amount_cents = amount_cents, fee_cents = fee,
-                    stripe_payment_intent_id = intent.id, status = "pending"))
+    deposit = Deposits(id = deposit_id, wallet_id = wallet.id, amount_cents = amount_cents, fee_cents = fee,
+                       stripe_payment_intent_id = intent.id, idempotency_key = idempotency_key, status = "pending")
+    db.add(deposit)
     await db.commit()
-    return {
-        "depositId": str(deposit_id),
-        "clientSecret": intent.client_secret,
-        "amountCents": amount_cents,
-        "feeCents": fee,
-        "totalCents": amount_cents + fee,
-    }
+    return _deposit_out(deposit, intent.client_secret)
 
 async def _deposit_lines(deposit: Deposits, accounts: dict, sign: int, db: AsyncSession) -> list:
     """external -total, Deposited Funds +amount, revenue +fee (or all reversed with sign = -1)."""
@@ -162,10 +182,11 @@ async def _has(deposit: Deposits, kind: str, db: AsyncSession) -> bool:
         select(LedgerTransactions.id).where(LedgerTransactions.deposit_id == deposit.id).where(LedgerTransactions.kind == kind)
     )).first() is not None
 
-async def handle_deposit_event(event_type: str, deposit: Deposits, db: AsyncSession) -> None:
+async def handle_deposit_event(event_type: str, deposit: Deposits, db: AsyncSession, stripe_object: dict | None = None) -> None:
     """
-    Stripe webhook events for a wallet deposit. Each is safe to receive twice: the ledger's
-    (deposit_id, kind) index allows one of each kind, and we check before posting.
+    Stripe webhook events for a wallet deposit. Each is safe to receive twice (or at the same
+    time): the deposit row is locked by the caller, we check before posting, and the ledger's
+    (deposit_id, kind) unique index has the final say.
     """
 
     wallet = (await db.execute(select(Wallets).where(Wallets.id == deposit.wallet_id).with_for_update())).scalars().one()
@@ -210,6 +231,14 @@ async def handle_deposit_event(event_type: str, deposit: Deposits, db: AsyncSess
         deposit.status = "succeeded"
         await db.flush()
         await ledger.unfreeze_if_clear(wallet, db)
+    elif event_type == "charge.refunded":
+        # Our refund landed. Backs up refund_deposit / the sweeper if their Stripe reply got lost.
+        if deposit.status == "refund_pending":
+            _refund_done(deposit, wallet, db)
+    elif event_type in ("refund.failed", "charge.refund.updated"):
+        # A refund the bank bounced later: put the money back in the wallet.
+        if (stripe_object or {}).get("status") == "failed" and (stripe_object.get("metadata") or {}).get("deposit_id") == str(deposit.id):
+            await _refund_failed(deposit, wallet, db, "the bank returned the refund")
     await db.commit()
 
 async def expire_stale_deposits(stripeClient: StripeClient) -> int:
@@ -305,16 +334,24 @@ async def _alert(subject: str, rows: dict) -> None:
 def _audit(db: AsyncSession, admin: dict, action: str, details: dict) -> None:
     db.add(AdminAuditLog(admin_id = uuid.UUID(admin["sub"]), admin_email = admin.get("email") or "", action = action, details = details))
 
-async def manual_move(admin: dict, email: str, direction: str, amount_cents: int, reason: str, reference: str, db: AsyncSession) -> dict:
+async def manual_move(admin: dict, email: str, direction: str, amount_cents: int, reason: str, reference: str,
+                      idempotency_key: str, db: AsyncSession) -> dict:
     """
     Staff add money to (credit) or take it out of (debit) a wallet's Deposited Funds, e.g. a
-    wired guaranteed prize. Never Earnings: wired money mustn't become withdrawable.
+    wired guaranteed prize. Never Earnings: wired money mustn't become withdrawable. Idempotent:
+    the admin form sends one key per submission, so a double click or a retry posts once (the
+    wallet row lock makes the check-then-post safe, and the unique key backs it up).
     """
 
     if amount_cents <= 0:
         raise HTTPException(status_code=422, detail="Enter an amount above $0.")
     user = await _account_by_email(email, db)
     wallet = await ledger.wallet_of(user.id, db, lock = True)
+    done = (await db.execute(
+        select(LedgerTransactions.id).where(LedgerTransactions.idempotency_key == idempotency_key)
+    )).first()
+    if done:
+        return await admin_wallet(user.email, db)
     accounts = await ledger.wallet_accounts(wallet.id, db)
     deposited = accounts[ledger.DEPOSITED]
     if direction == "debit" and deposited.balance_cents < amount_cents and wallet.frozen_at is None:
@@ -323,7 +360,8 @@ async def manual_move(admin: dict, email: str, direction: str, amount_cents: int
     sign = 1 if direction == "credit" else -1
     kind = "manual_credit" if direction == "credit" else "manual_debit"
     await ledger.post(db, kind, [(external.id, -sign * amount_cents), (deposited.id, sign * amount_cents)],
-                      created_by = uuid.UUID(admin["sub"]), reason = reason.strip(), reference = reference.strip())
+                      created_by = uuid.UUID(admin["sub"]), reason = reason.strip(), reference = reference.strip(),
+                      idempotency_key = idempotency_key)
     await db.flush()
     await ledger.unfreeze_if_clear(wallet, db)
     details = {"account": str(user.id), "email": user.email, "amount_cents": amount_cents, "reason": reason, "reference": reference}
@@ -333,38 +371,138 @@ async def manual_move(admin: dict, email: str, direction: str, amount_cents: int
     await _alert(f"uSync {kind.replace('_', ' ')}: {_money(amount_cents)} for {user.email}", {**details, "by": admin.get("email")})
     return await admin_wallet(user.email, db)
 
+# ---- refunds ------------------------------------------------------------------------------
+#
+# A refund takes the money out of the wallet FIRST (a 'deposit_refund' ledger transaction and
+# status 'refund_pending', committed), so it can't be spent while Stripe works. Then Stripe is
+# asked for the refund. Every step can be repeated safely:
+# - the ledger allows one 'deposit_refund' (and one 'deposit_refund_reversal') per deposit;
+# - before creating a refund we look for one Stripe already has for this deposit (idempotency
+#   keys only last 24 hours), and create with a fixed key;
+# - a temporary Stripe error leaves the deposit 'refund_pending': the hold sweeper retries every
+#   couple of minutes, and the charge.refunded webhook also finishes it;
+# - if Stripe refuses for good (or the bank later bounces the refund), a reversal puts the money
+#   back and the deposit is 'refund_failed'.
+
+def _refund_done(deposit: Deposits, wallet: Wallets, db: AsyncSession) -> None:
+    deposit.status = "refunded"
+    notify(db, [wallet.account_id], "deposit_refunded", {"amount_cents": deposit.amount_cents + deposit.fee_cents})
+
+async def _refund_failed(deposit: Deposits, wallet: Wallets, db: AsyncSession, why: str) -> None:
+    if not await _has(deposit, "deposit_refund", db) or await _has(deposit, "deposit_refund_reversal", db):
+        return
+    accounts = await ledger.wallet_accounts(wallet.id, db)
+    await ledger.post(db, "deposit_refund_reversal", await _deposit_lines(deposit, accounts, 1, db), deposit_id = deposit.id,
+                      reason = f"Refund didn't go through: {why}")
+    deposit.status = "refund_failed"
+    logger.error("Refund of deposit %s failed (%s); the money is back in wallet %s", deposit.id, why, wallet.id)
+    await _alert(f"uSync deposit refund FAILED: {_money(deposit.amount_cents + deposit.fee_cents)}",
+                 {"deposit": str(deposit.id), "wallet": str(wallet.id), "why": why, "what happened": "the money was put back in the wallet"})
+
+async def _stripe_refund(deposit: Deposits, stripeClient: StripeClient):
+    """The refund Stripe already has for this deposit, or a new one (with a fixed key)."""
+    existing = await stripeClient.v1.refunds.list_async({"payment_intent": deposit.stripe_payment_intent_id, "limit": 100})
+    for refund in existing.data:
+        if (refund.metadata or {}).get("deposit_id") == str(deposit.id) and refund.status not in ("failed", "canceled"):
+            return refund
+    return await stripeClient.v1.refunds.create_async(
+        {"payment_intent": deposit.stripe_payment_intent_id, "amount": deposit.amount_cents + deposit.fee_cents,
+         "metadata": {"kind": "wallet_deposit_refund", "deposit_id": str(deposit.id)}},
+        {"idempotency_key": f"wallet-deposit-refund-{deposit.id}"},
+    )
+
+async def settle_refund(deposit_id, db: AsyncSession, stripeClient: StripeClient) -> str:
+    """
+    Gets Stripe to refund a 'refund_pending' deposit. Returns 'refunded', 'failed', 'retry'
+    (left pending for the sweeper) or 'noop' (nothing pending). Commits.
+    """
+
+    deposit = (await db.execute(
+        select(Deposits).where(Deposits.id == deposit_id).where(Deposits.status == "refund_pending").with_for_update()
+    )).scalars().first()
+    if deposit is None:
+        await db.rollback()
+        return "noop"
+    wallet = (await db.execute(select(Wallets).where(Wallets.id == deposit.wallet_id).with_for_update())).scalars().one()
+    try:
+        refund = await _stripe_refund(deposit, stripeClient)
+    except (stripe.InvalidRequestError, stripe.CardError) as e:
+        await _refund_failed(deposit, wallet, db, e.user_message or str(e))
+        await db.commit()
+        return "failed"
+    except stripe.StripeError:
+        logger.warning("Temporary Stripe error refunding deposit %s; the sweeper will retry", deposit.id, exc_info = True)
+        await db.rollback()
+        return "retry"
+    if refund.status in ("failed", "canceled"):
+        await _refund_failed(deposit, wallet, db, f"Stripe marked the refund {refund.status}")
+        await db.commit()
+        return "failed"
+    _refund_done(deposit, wallet, db)
+    await db.commit()
+    return "refunded"
+
 async def refund_deposit(admin: dict, deposit_id: uuid.UUID, reason: str, db: AsyncSession, stripeClient: StripeClient) -> dict:
     """
     Staff refund a deposit to its card: the whole charge (amount + fee), only while that much is
-    still in Deposited Funds. Stripe first, then the ledger in the same request.
+    still in Deposited Funds. Pressing it again (or retrying) never refunds twice: a refund that's
+    already pending is just pushed along, and a finished one is left alone.
     """
 
     deposit = (await db.execute(select(Deposits).where(Deposits.id == deposit_id).with_for_update())).scalars().first()
     if deposit is None:
         raise HTTPException(status_code=404, detail="Deposit not found.")
-    if deposit.status != "succeeded" or await _has(deposit, "deposit_refund", db):
-        raise HTTPException(status_code=409, detail="Only a succeeded deposit that hasn't been refunded or charged back can be refunded.")
     wallet = (await db.execute(select(Wallets).where(Wallets.id == deposit.wallet_id).with_for_update())).scalars().one()
+    email = (await db.execute(select(UsersParent.email).where(UsersParent.id == wallet.account_id))).scalar()
+
+    deposit_id, total = deposit.id, deposit.amount_cents + deposit.fee_cents
+    if deposit.status in ("refund_pending", "refunded"):
+        await db.rollback()
+        await settle_refund(deposit_id, db, stripeClient)
+        return await admin_wallet(email, db) if email else {}
+    if deposit.status != "succeeded":
+        raise HTTPException(status_code=409, detail="Only a succeeded deposit that hasn't been refunded or charged back can be refunded.")
     accounts = await ledger.wallet_accounts(wallet.id, db)
     if accounts[ledger.DEPOSITED].balance_cents < deposit.amount_cents:
         raise HTTPException(status_code=409, detail=(
             f"Deposited Funds only has {_money(accounts[ledger.DEPOSITED].balance_cents)}, so this {_money(deposit.amount_cents)} deposit can't be refunded."
         ))
-    try:
-        await stripeClient.v1.refunds.create_async(
-            {"payment_intent": deposit.stripe_payment_intent_id, "amount": deposit.amount_cents + deposit.fee_cents,
-             "metadata": {"kind": "wallet_deposit_refund", "deposit_id": str(deposit.id)}},
-            {"idempotency_key": f"wallet-deposit-refund-{deposit.id}"},
-        )
-    except stripe.StripeError as e:
-        raise HTTPException(status_code=502, detail=f"Stripe refused the refund: {e.user_message or e}")
+
+    # 1. Take the money out of the wallet and commit, before Stripe is involved.
     await ledger.post(db, "deposit_refund", await _deposit_lines(deposit, accounts, -1, db), deposit_id = deposit.id,
                       created_by = uuid.UUID(admin["sub"]), reason = reason.strip() or None)
-    deposit.status = "refunded"
+    deposit.status = "refund_pending"
     details = {"deposit": str(deposit.id), "wallet": str(wallet.id), "amount_cents": deposit.amount_cents, "fee_cents": deposit.fee_cents, "reason": reason}
     _audit(db, admin, "wallet:deposit_refund", details)
-    notify(db, [wallet.account_id], "deposit_refunded", {"amount_cents": deposit.amount_cents + deposit.fee_cents})
     await db.commit()
-    await _alert(f"uSync deposit refund: {_money(deposit.amount_cents + deposit.fee_cents)}", {**details, "by": admin.get("email")})
-    email = (await db.execute(select(UsersParent.email).where(UsersParent.id == wallet.account_id))).scalar()
+
+    # 2. Ask Stripe. A temporary failure stays pending for the sweeper.
+    outcome = await settle_refund(deposit_id, db, stripeClient)
+    await _alert(f"uSync deposit refund ({outcome}): {_money(total)}", {**details, "by": admin.get("email")})
+    if outcome == "failed":
+        raise HTTPException(status_code=502, detail="Stripe refused the refund, so the money was put back in the wallet.")
     return await admin_wallet(email, db) if email else {}
+
+async def retry_pending_refunds(stripeClient: StripeClient, older_than_minutes: int = 1) -> int:
+    """
+    The hold sweeper's pass over refunds left 'refund_pending' by a temporary Stripe error (or a
+    crash between our COMMIT and Stripe). Returns how many finished.
+    """
+
+    async with AsyncSessionLocal() as db:
+        # Leave a refund that's being made right now to the request making it.
+        cutoff = _now() - timedelta(minutes = older_than_minutes)
+        pending = (await db.execute(
+            select(Deposits.id).join(LedgerTransactions, (LedgerTransactions.deposit_id == Deposits.id) & (LedgerTransactions.kind == "deposit_refund"))
+            .where(Deposits.status == "refund_pending").where(LedgerTransactions.created_at < cutoff).limit(50)
+        )).scalars().all()
+        await db.rollback()
+        finished = 0
+        for deposit_id in pending:
+            try:
+                if await settle_refund(deposit_id, db, stripeClient) in ("refunded", "failed"):
+                    finished += 1
+            except Exception:
+                await db.rollback()
+                logger.exception("Retrying the refund of deposit %s failed", deposit_id)
+        return finished

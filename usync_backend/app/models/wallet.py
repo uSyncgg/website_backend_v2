@@ -58,6 +58,8 @@ class Deposits(Base):
     SQL Alchemy model describing the deposits table: the Stripe side of one deposit. The wallet is
     only credited (a 'deposit' ledger transaction) when Stripe's webhook says it succeeded; the
     unique PaymentIntent id and the ledger's (deposit_id, kind) index stop double credits.
+    status: pending -> succeeded (or failed / canceled); then possibly charged_back, or
+    refund_pending -> refunded (or refund_failed, with the money put back).
     """
 
     __tablename__ = "deposits"
@@ -67,15 +69,21 @@ class Deposits(Base):
     amount_cents: Mapped[int] = mapped_column(BigInteger)
     fee_cents: Mapped[int] = mapped_column(BigInteger)
     stripe_payment_intent_id: Mapped[str] = mapped_column(Text)
+    # One per deposit dialog in the browser: a retried "start deposit" returns this deposit.
+    idempotency_key: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, server_default = text("'pending'"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = text("now()"))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone = True), nullable = True)
 
     __table_args__ = (
         UniqueConstraint("stripe_payment_intent_id", name = "uq_deposits_payment_intent"),
+        UniqueConstraint("idempotency_key", name = "uq_deposits_idempotency_key"),
         CheckConstraint("amount_cents >= 500", name = "ck_deposits_minimum"),
         CheckConstraint("fee_cents >= 0", name = "ck_deposits_fee"),
-        CheckConstraint("status IN ('pending', 'succeeded', 'failed', 'canceled', 'refunded', 'charged_back')", name = "ck_deposits_status"),
+        CheckConstraint(
+            "status IN ('pending', 'succeeded', 'failed', 'canceled', 'refunded', 'charged_back', 'refund_pending', 'refund_failed')",
+            name = "ck_deposits_status",
+        ),
         Index("ix_deposits_wallet_created", "wallet_id", "created_at"),
     )
 
@@ -95,11 +103,13 @@ class LedgerTransactions(Base):
     created_by_account_id: Mapped[uuid.UUID | None] = mapped_column(nullable = True)
     reason: Mapped[str | None] = mapped_column(Text, nullable = True)
     reference: Mapped[str | None] = mapped_column(Text, nullable = True)
+    # Set for actions a person can retry (manual credits/debits): the same key posts only once.
+    idempotency_key: Mapped[str | None] = mapped_column(Text, nullable = True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = text("now()"))
 
     __table_args__ = (
         CheckConstraint(
-            "kind IN ('deposit', 'deposit_refund', 'chargeback', 'chargeback_reversal', 'manual_credit', 'manual_debit')",
+            "kind IN ('deposit', 'deposit_refund', 'chargeback', 'chargeback_reversal', 'manual_credit', 'manual_debit', 'deposit_refund_reversal')",
             name = "ck_ledger_transactions_kind",
         ),
         CheckConstraint(
@@ -107,6 +117,7 @@ class LedgerTransactions(Base):
             name = "ck_ledger_transactions_manual_reason",
         ),
         Index("uq_ledger_transactions_deposit_kind", "deposit_id", "kind", unique = True, postgresql_where = text("deposit_id IS NOT NULL")),
+        Index("uq_ledger_transactions_idempotency_key", "idempotency_key", unique = True, postgresql_where = text("idempotency_key IS NOT NULL")),
     )
 
 class LedgerLines(Base):

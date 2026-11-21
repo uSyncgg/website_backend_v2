@@ -10,6 +10,10 @@ from app.models.wallet import Wallets, LedgerAccounts, LedgerTransactions, Ledge
 # isn't frozen, and refuses the whole COMMIT if the lines don't sum to zero. Nothing here commits:
 # the caller commits the money together with whatever it belongs to (a deposit's status, ...).
 #
+# Idempotency: everything that posts must be safe to repeat. Webhook-driven transactions are
+# keyed by (deposit_id, kind), unique in Postgres; actions a person triggers carry an
+# idempotency_key, unique too. Callers check first and treat a unique violation as "already done".
+#
 # Wallet buckets: 'wallet_deposited' (can be spent, never withdrawn) and 'wallet_earnings'
 # (prizes and host cuts; the only money that can be withdrawn).
 
@@ -44,7 +48,8 @@ async def system_account(type_: str, db: AsyncSession) -> LedgerAccounts:
     return (await db.execute(select(LedgerAccounts).where(LedgerAccounts.type == type_))).scalars().one()
 
 async def post(db: AsyncSession, kind: str, lines: list[tuple[uuid.UUID, int]], *, deposit_id = None,
-               created_by = None, reason: str | None = None, reference: str | None = None) -> LedgerTransactions:
+               created_by = None, reason: str | None = None, reference: str | None = None,
+               idempotency_key: str | None = None) -> LedgerTransactions:
     """
     Writes one ledger transaction: lines are (ledger account id, signed cents), positive = in.
     Zero amounts are dropped. The caller commits; Postgres checks the sum then.
@@ -55,7 +60,7 @@ async def post(db: AsyncSession, kind: str, lines: list[tuple[uuid.UUID, int]], 
         # Postgres would refuse it at COMMIT anyway; failing here gives a clearer stack trace.
         raise ValueError(f"Ledger transaction {kind} doesn't balance: {lines}")
     txn = LedgerTransactions(id = uuid.uuid4(), kind = kind, deposit_id = deposit_id, created_by_account_id = created_by,
-                             reason = reason, reference = reference)
+                             reason = reason, reference = reference, idempotency_key = idempotency_key)
     db.add(txn)
     await db.flush()
     db.add_all([LedgerLines(transaction_id = txn.id, ledger_account_id = account_id, amount_cents = cents) for account_id, cents in lines])

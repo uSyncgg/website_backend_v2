@@ -33,13 +33,15 @@ async def handle_stripe_webhook(payload: bytes, signature: str, db: AsyncSession
 
     stripe_object = event["data"]["object"]
     # payment_intent.* events carry the PaymentIntent itself; charge.* events (including
-    # charge.dispute.*) carry a Charge or Dispute that points at its PaymentIntent.
-    payment_intent_id = stripe_object["payment_intent"] if event["type"].startswith("charge.") else stripe_object["id"]
+    # charge.dispute.*) and refund.* carry a Charge, Dispute or Refund that points at its PaymentIntent.
+    payment_intent_id = (
+        stripe_object.get("payment_intent") if event["type"].startswith(("charge.", "refund.")) else stripe_object["id"]
+    )
 
     # Wallet deposits are their own PaymentIntents; everything else here is a LAN pass.
     deposit = await wallet.deposit_for_payment_intent(payment_intent_id, db, lock = True) if payment_intent_id else None
     if deposit is not None:
-        await wallet.handle_deposit_event(event["type"], deposit, db)
+        await wallet.handle_deposit_event(event["type"], deposit, db, stripe_object)
         return {"status": "ok"}
 
     stmt = select(EventRegistrations).where(EventRegistrations.stripe_payment_intent_id == payment_intent_id)

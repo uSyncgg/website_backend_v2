@@ -78,7 +78,7 @@ async def adminAdjustWallet(request: Request, response: Response, body: ManualMo
     a reason and a reference. Audit logged and emailed to MONEY_ALERT_EMAIL.
     """
 
-    return await wallet_svc.manual_move(claims, body.email, body.direction, body.amount_cents, body.reason, body.reference, db)
+    return await wallet_svc.manual_move(claims, body.email, body.direction, body.amount_cents, body.reason, body.reference, body.idempotency_key, db)
 
 @router.post("/deposits/{deposit_id}/refund", response_model=AdminWalletOut)
 @limiter.limit(MODERATE)

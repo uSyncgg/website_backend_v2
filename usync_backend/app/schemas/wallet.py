@@ -31,6 +31,8 @@ class DepositIn(CamelModel):
     # What lands in the wallet, in cents; the 5% fee is added on top. Range checks are in the
     # service (with the messages users see); this only stops absurd numbers.
     amount_cents: int = Field(gt = 0, le = 100_000_000)
+    # One per deposit dialog: retrying with the same key returns the same deposit.
+    idempotency_key: str = Field(min_length = 16, max_length = 100, pattern = r"^[A-Za-z0-9-]+$")
 
 class DepositStartOut(Out):
     depositId: str
@@ -38,6 +40,7 @@ class DepositStartOut(Out):
     amountCents: int
     feeCents: int
     totalCents: int
+    status: str
 
 class ManualMoveIn(CamelModel):
     email: str = Field(min_length = 3, max_length = 320)
@@ -45,6 +48,8 @@ class ManualMoveIn(CamelModel):
     amount_cents: int = Field(gt = 0, le = 100_000_000)
     reason: str = Field(min_length = 3, max_length = 500)
     reference: str = Field(min_length = 1, max_length = 200)
+    # One per form submission: a double click or retry posts once.
+    idempotency_key: str = Field(min_length = 16, max_length = 100, pattern = r"^[A-Za-z0-9-]+$")
 
 class DepositRefundIn(CamelModel):
     reason: str = Field(default = "", max_length = 500)

@@ -29,4 +29,4 @@ async def startDeposit(request: Request, response: Response, body: DepositIn, cl
     wallet is credited by Stripe's webhook, not by this call.
     """
 
-    return await svc.start_deposit(claims["sub"], body.amount_cents, db, stripeClient)
+    return await svc.start_deposit(claims["sub"], body.amount_cents, body.idempotency_key, db, stripeClient)
