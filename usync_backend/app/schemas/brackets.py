@@ -80,9 +80,10 @@ class EventDelay(CamelModel):
     reason: str = Field(default = "", max_length = 300)
 
 class Registration(CamelModel):
+    # Every entry comes from a team (its public id), entered by its owner or a captain.
     team_id: str | None = None
-    # Team events: the players the captain picks (profile public ids). Fewer than the team size
-    # leaves the team pending until the captain picks the rest.
+    # Exactly the event's team size in players from the team (profile public ids); in a solo event
+    # the one player who'll compete, the captain or a teammate.
     players: list[str] = Field(default_factory = list, max_length = 10)
     email: str = Field(max_length = 200)
     answers: dict[str, str] = Field(default_factory = dict)
@@ -105,6 +106,8 @@ class Registration(CamelModel):
 
 class PlayersUpdate(CamelModel):
     players: list[str] = Field(max_length = 10)
+    # Which entry, when the account acts for several (a team's entries in a solo event).
+    entrant_id: str | None = None
 
 class SeedsUpdate(CamelModel):
     seeds: list[str] = Field(max_length = 1024)
@@ -143,6 +146,7 @@ class EntrantOut(Out):
     status: str
     registeredAt: str | None
     teamId: str | None
+    teamName: str | None = None
     players: list[ProfileRef]
     roster: list[str]
     rosterSize: int
@@ -212,6 +216,7 @@ class EventOut(Out):
     openIssues: int
     viewerEntrantId: str | None
     viewerCanAct: bool
+    viewerActsFor: list[str] = []
     bracket: BracketOut | None
 
 class EventSummary(Out):
@@ -228,6 +233,7 @@ class EventSummary(Out):
     hostProfile: str | None
     maxEntrants: int | None
     signedUp: int
+    needsPlayers: int
     pending: int
     canManage: bool
     isHost: bool

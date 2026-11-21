@@ -76,15 +76,21 @@ class BracketEvents(Base):
 
 class BracketEntries(Base):
     """
-    SQL Alchemy model describing the bracket_entries table: one entrant in an event, either a
-    player on their own (1v1) or a team.
+    SQL Alchemy model describing the bracket_entries table: one entrant in an event. Every entry is
+    entered by a team's owner or captain, who picks the event's team size in players
+    (bracket_entry_players). In a solo event (team size 1) a team can enter several of its players,
+    one entry each, named after the player; in a team event a team enters once, named after it.
+    "One entry per team" is checked by the API under the event's row lock, because a unique index
+    can't see the event's team size. "One entry per player per event" is a unique index on
+    bracket_entry_players.
 
-    status is 'signed_up' or 'pending'. A team is pending until its captain has picked the
-    event's team size in players (bracket_entry_players), or while the event is full; pending
-    entries don't take a spot and aren't seeded.
+    status is 'signed_up', or 'needs_players' once a picked player leaves the team before the
+    bracket is published. Both hold a spot (every entry counts towards max_entrants; there's no
+    waitlist). Entries still short when the bracket is published are dropped.
 
-    profile_id is the solo player, or for a team the profile that registered it. It's nulled (not
-    cascaded) when that profile is deleted, so the entry - and any bracket it's in - survives.
+    team_id is never null for new entries. It's nulled (not cascaded) when the team is deleted
+    after the event started, so the entry - and any bracket it's in - survives. profile_id is the
+    profile that entered it, nulled the same way.
     """
 
     __tablename__ = "bracket_entries"
@@ -101,9 +107,7 @@ class BracketEntries(Base):
     registered_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = text("now()"))
 
     __table_args__ = (
-        CheckConstraint("status IN ('signed_up', 'pending')", name = "ck_bracket_entries_status"),
-        Index("uq_bracket_entries_team", "event_id", "team_id", unique = True, postgresql_where = text("team_id IS NOT NULL")),
-        Index("uq_bracket_entries_solo", "event_id", "profile_id", unique = True, postgresql_where = text("team_id IS NULL")),
+        CheckConstraint("status IN ('signed_up', 'needs_players')", name = "ck_bracket_entries_status"),
     )
 
 class BracketEntryPlayers(Base):
@@ -293,7 +297,7 @@ class EventIssues(Base):
     """
     SQL Alchemy model describing the event_issues table: the per-event admin queue. Anything that
     needs the host or an admin to step in - a disputed score, a one-sided report left 5 minutes,
-    a no-show, a post-advancement dispute - is a row here, and the host and admins are notified.
+    a no-show, a post-advancement dispute, a stalled match nobody has reported - is a row here, and the host and admins are notified.
     Only they can see an event's queue. Oldest first.
 
     status: 'open' (in the queue) -> 'claimed' (someone pressed "go to issue"; shown as claimed
@@ -322,7 +326,7 @@ class EventIssues(Base):
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone = True), nullable = True)
 
     __table_args__ = (
-        CheckConstraint("type IN ('dispute', 'one_sided_report', 'no_show', 'post_advancement_dispute')", name = "ck_event_issues_type"),
+        CheckConstraint("type IN ('dispute', 'one_sided_report', 'no_show', 'post_advancement_dispute', 'stalled_match')", name = "ck_event_issues_type"),
         CheckConstraint("status IN ('open', 'claimed', 'dismissed', 'resolved')", name = "ck_event_issues_status"),
         Index("ix_event_issues_queue", "event_id", "status", "created_at"),
         Index("uq_event_issues_one_dispute_per_side", "match_id", "raised_by_entry_id", unique = True,

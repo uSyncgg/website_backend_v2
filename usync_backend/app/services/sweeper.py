@@ -12,7 +12,8 @@ from app.services.notifications import delete_old_read
 logger = logging.getLogger(__name__)
 
 # The bracket background job, once a minute:
-# - one-sided reports nobody answered for 5 minutes go in the admin queue;
+# - one-sided reports nobody answered for 5 minutes, and ready matches nobody has reported for an
+#   hour (a week in leagues), go in the admin queue;
 # - admin queue claims older than 10 minutes go back to open, and queue items whose match now has
 #   a result close themselves;
 # - read notifications older than 90 days, and answered team invites older than 90 days, are
@@ -31,6 +32,7 @@ async def sweep_once() -> None:
         if not got_lock:
             return
         raised = await matches.flag_one_sided_reports(db)
+        stalled = await matches.flag_stalled_matches(db)
         await event_issues.housekeep(db)
         removed = await delete_old_read(db)
         cutoff = datetime.now(timezone.utc) - timedelta(days = INVITE_RETENTION_DAYS)
@@ -38,8 +40,9 @@ async def sweep_once() -> None:
             delete(TeamInvites).where(TeamInvites.status != "pending").where(TeamInvites.responded_at < cutoff)
         )).rowcount or 0
         await db.commit()
-        if raised or removed or invites:
-            logger.info("Bracket sweep: %s one-sided reports queued, %s notifications and %s invites deleted.", raised, removed, invites)
+        if raised or stalled or removed or invites:
+            logger.info("Bracket sweep: %s one-sided reports and %s stalled matches queued, %s notifications and %s invites deleted.",
+                        raised, stalled, removed, invites)
 
 async def run_bracket_sweeper() -> None:
     while True:

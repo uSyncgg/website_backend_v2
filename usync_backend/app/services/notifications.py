@@ -9,8 +9,9 @@ from app.models.brackets import Notifications
 # table and shown alongside); these are everything else. Types and their `data`:
 #
 #   team_joined       { team_id, team_name, who }                     someone accepted an invite to your team
-#   team_signed_up    { event_id, event_name, team_name }             your pending team now has enough players
-#   team_pending      { event_id, event_name, team_name, have, need }  your team dropped below the team size
+#   team_signed_up    { event_id, event_name, team_name }             your entry has its full roster again
+#   team_pending      { event_id, event_name, team_name, have, need }  your entry lost a player; pick another (it keeps its spot)
+#   entry_dropped     { event_id, event_name, team_name }             the bracket was published while your entry was still short
 #   event_delayed     { event_id, event_name, starts_at, reason }
 #   match_ready       { event_id, event_name, match_id, opponent }    you have a match to play
 #   opponent_reported { event_id, event_name, match_id, opponent }    the other side reported a score - confirm yours

@@ -25,12 +25,15 @@ from app.services.notifications import notify
 
 # Bracket hosting: events a host or venue profile runs, their sign-ups and their brackets.
 #
-# - Sign-ups: a solo player (1v1), or a team entered by its owner or a captain, who picks which of
-#   its players play (bracket_entry_players). A team is pending - no spot, not seeded - until the
-#   event's team size in players is picked, or while the event is full. A player can only be in an
-#   event once, can't play two events that start at the same time, and the host and admins can't
-#   play at all. The captain can change the picks until the bracket is published; then the event's
-#   roster is locked. The team itself never freezes.
+# - Sign-ups: always a team, entered by its owner or a captain, who picks exactly the event's team
+#   size in players (bracket_entry_players). In a solo event (team size 1) a team can enter several
+#   of its players, one entry each; in a team event a team enters once. Every entry takes a spot
+#   and there's no waitlist: a full event turns sign-ups away. A player can only be in an event
+#   once, can't play two events that start at the same time, and the host and admins can't play at
+#   all. The captain can change the picks until the bracket is published; then the event's roster
+#   is locked. If a picked player leaves the team before that, the entry keeps its spot as
+#   'needs_players' until the captain picks someone else; entries still short at publishing are
+#   dropped. The team itself never freezes.
 # - The team must play the event's game (team_games).
 # - Bracket: a draft (seeds, previewed with the engine) the host and admins can see, then published
 #   (match rows created; see bracket_sync and matches) and finally complete.
@@ -159,7 +162,7 @@ async def _event_out(event: BracketEvents, user_id: str | None, db: AsyncSession
         )).scalars().all()
     }
     team_ids = {e.team_id for e in entries if e.team_id}
-    team_public = dict((await db.execute(select(Teams.id, Teams.public_id).where(Teams.id.in_(team_ids)))).all()) if team_ids else {}
+    teams = {t.id: t for t in (await db.execute(select(Teams).where(Teams.id.in_(team_ids)))).scalars().all()} if team_ids else {}
     mine = await access.my_profile_ids(user_id, db)
     roles = await access.my_team_roles(user_id, db)
     is_host = event.host_profile_id in mine
@@ -168,24 +171,33 @@ async def _event_out(event: BracketEvents, user_id: str | None, db: AsyncSession
         .where(BracketEventAdmins.event_id == event.id).order_by(BracketEventAdmins.created_at)
     )).all()
     can_manage = is_host or any(a.status == "accepted" and p.id in mine for a, p in admin_rows)
-    viewer = await access.viewer_entry(user_id, entries, db, roles)
+    solo = event.team_size == 1
+    viewer = await access.viewer_entry(user_id, entries, db, roles, solo = solo)
+    playing = {x.id for x in entries for _, p in players.get(x.id, []) if p is not None and p.id in mine}
+    # Every entrant the viewer can act for: a captain can have several in a solo event.
+    acts_for = [
+        str(x.id) for x in entries
+        if roles.get(x.team_id) in ("owner", "captain") or (solo and x.id in playing)
+    ]
 
     entrants = []
     for x in entries:
         picked = [p for _, p in players.get(x.id, []) if p is not None]
         registrant = registrants.get(x.profile_id)
+        team = teams.get(x.team_id)
         entrant = {
             "id": str(x.id),
             "name": x.name,
             "captain": registrant.username if registrant else "",
             "status": x.status,
             "registeredAt": _iso(x.registered_at),
-            "teamId": team_public.get(x.team_id),
+            "teamId": team.public_id if team else None,
+            "teamName": team.name if team else None,
             "players": [_profile_ref(p) for p in picked],
             "roster": [p.username for p in picked],
             "rosterSize": len(picked),
         }
-        if can_manage or (viewer and viewer[0] is x and viewer[1]):
+        if can_manage or str(x.id) in acts_for:
             entrant.update({"email": x.email, "answers": x.answers or {}, "pass": x.pass_name})
         entrants.append(entrant)
 
@@ -252,6 +264,7 @@ async def _event_out(event: BracketEvents, user_id: str | None, db: AsyncSession
         "openIssues": (await issues.open_counts([event.id], db)).get(event.id, 0) if can_manage else 0,
         "viewerEntrantId": str(viewer[0].id) if viewer else None,
         "viewerCanAct": bool(viewer and viewer[1]),
+        "viewerActsFor": acts_for,
         "bracket": bracket_out,
     }
 
@@ -321,7 +334,7 @@ async def _summaries(events: list[BracketEvents], user_id: str | None, db: Async
         is_host = event.host_profile_id in mine
         can_manage = is_host or event.id in admin_of
         entries = await access.entries_of(event.id, db) if user_id else []
-        viewer = await access.viewer_entry(user_id, entries, db, roles) if entries else None
+        viewer = await access.viewer_entry(user_id, entries, db, roles, solo = event.team_size == 1) if entries else None
         viewer_match, winner, place = None, None, None
         if bracket and bracket.status != "draft":
             if viewer:
@@ -353,7 +366,9 @@ async def _summaries(events: list[BracketEvents], user_id: str | None, db: Async
             "hostProfile": hosts.get(event.host_profile_id),
             "maxEntrants": event.max_entrants,
             "signedUp": counts.get(event.id, {}).get("signed_up", 0),
-            "pending": counts.get(event.id, {}).get("pending", 0),
+            "needsPlayers": counts.get(event.id, {}).get("needs_players", 0),
+            # Old name for needsPlayers, kept until the frontend stops reading it.
+            "pending": counts.get(event.id, {}).get("needs_players", 0),
             "canManage": can_manage,
             "isHost": is_host,
             "openIssues": open_counts.get(event.id, 0) if can_manage else 0,
@@ -502,50 +517,41 @@ async def delay_start(user_id: str, public_id: str, body: EventDelay, db: AsyncS
 
 # ---- sign-ups ----------------------------------------------------------------------
 
-def _refresh_statuses(event: BracketEvents, entries: list[BracketEntries], picked: dict) -> list[tuple]:
+def _refresh_statuses(entries: list[BracketEntries], picked: dict, team_size: int) -> list[tuple]:
     """
-    Who's signed up and who's pending, in sign-up order. An entry is signed up once it has the
-    team size in players and there's a spot; signed-up entries keep their spot while they still
-    have enough players. Returns [(entry, new_status)] for the ones that moved.
+    Signed up or needs players, from how many players each entry has picked. Every entry keeps its
+    spot either way. Returns [(entry, new_status)] for the ones that moved.
     """
 
     changes = []
-
-    def full(e):
-        return picked.get(e.id, 0) >= event.team_size
-
     for e in entries:
-        if e.status == "signed_up" and not full(e):
-            e.status = "pending"
-            changes.append((e, "pending"))
-    taken = sum(1 for e in entries if e.status == "signed_up")
-    for e in entries:
-        if e.status == "pending" and full(e) and (event.max_entrants is None or taken < event.max_entrants):
-            e.status = "signed_up"
-            changes.append((e, "signed_up"))
-            taken += 1
+        status = "signed_up" if picked.get(e.id, 0) >= team_size else "needs_players"
+        if e.status != status:
+            e.status = status
+            changes.append((e, status))
     return changes
+
+async def _picked_counts(event: BracketEvents, db: AsyncSession) -> dict:
+    return dict((await db.execute(
+        select(BracketEntryPlayers.entry_id, func.count()).where(BracketEntryPlayers.event_id == event.id)
+        .where(BracketEntryPlayers.profile_id.is_not(None)).group_by(BracketEntryPlayers.entry_id)
+    )).all())
 
 async def _refresh_and_notify(event: BracketEvents, entries: list[BracketEntries], db: AsyncSession) -> None:
     """
-    Re-works out signed up / pending (not once the bracket is live) and tells teams that moved.
-    The caller commits.
+    Re-works out signed up / needs players (not once the bracket is live) and tells the entries
+    that moved. The caller commits.
     """
 
     bracket = await _bracket(event.id, db)
     if bracket and bracket.status != "draft":
         return
-    picked = dict((await db.execute(
-        select(BracketEntryPlayers.entry_id, func.count()).where(BracketEntryPlayers.event_id == event.id)
-        .where(BracketEntryPlayers.profile_id.is_not(None)).group_by(BracketEntryPlayers.entry_id)
-    )).all())
-    changes = _refresh_statuses(event, entries, picked)
+    picked = await _picked_counts(event, db)
+    changes = _refresh_statuses(entries, picked, event.team_size)
     if not changes:
         return
     accounts = await access.entry_accounts([e for e, _ in changes], db)
     for entry, new in changes:
-        if entry.team_id is None:
-            continue
         data = {"event_id": event.public_id, "event_name": event.name, "team_name": entry.name}
         if new == "signed_up":
             notify(db, accounts.get(entry.id, ()), "team_signed_up", data)
@@ -620,7 +626,51 @@ async def _team_players(team: Teams, public_ids: list[str], limit: int, db: Asyn
     order = {pid: i for i, pid in enumerate(public_ids)}
     return sorted(rows, key=lambda p: order[p.public_id])
 
+async def _entering_team(user_id: str, team_public_id: str | None, event: BracketEvents, db: AsyncSession) -> tuple:
+    """
+    The team the signed in account is entering, and the profile they enter it as: they must own or
+    captain it, and it must play the event's game.
+    """
+
+    if not team_public_id:
+        raise HTTPException(status_code=422, detail="Pick a team to enter.")
+    team = (await db.execute(select(Teams).where(Teams.public_id == team_public_id))).scalars().first()
+    role = (await access.my_team_roles(user_id, db)).get(team.id) if team else None
+    if not team or role is None:
+        raise HTTPException(status_code=404, detail="Team not found.")
+    if role not in ("owner", "captain"):
+        raise HTTPException(status_code=403, detail="Only the team's owner or a captain can enter it.")
+    plays = (await db.execute(select(TeamGames.game_id).where(TeamGames.team_id == team.id).where(TeamGames.game_id == event.game_id))).first()
+    if not plays:
+        game = await db.get(Games, event.game_id)
+        raise HTTPException(status_code=409, detail=f"{team.name} doesn't play {game.name}. Add it to the team's games to enter.")
+    registrant = team.owner_profile_id if role == "owner" else (await db.execute(
+        select(Profiles.id).join(TeamMembers, TeamMembers.profile_id == Profiles.id)
+        .where(TeamMembers.team_id == team.id).where(Profiles.account_id == user_id)
+    )).scalar()
+    return team, registrant
+
+async def _full_roster(team: Teams, public_ids: list[str], team_size: int, db: AsyncSession) -> list[Profiles]:
+    """
+    Exactly the event's team size in players from the team, or a clear reason why not.
+    """
+
+    roster = (await db.execute(select(func.count()).select_from(TeamMembers).where(TeamMembers.team_id == team.id))).scalar() or 0
+    if roster < team_size:
+        raise HTTPException(status_code=409, detail=(
+            f"{team.name} doesn't have enough players on its roster for this event: it needs {team_size} and has {roster}."
+        ))
+    chosen = await _team_players(team, public_ids, team_size, db)
+    if len(chosen) != team_size:
+        raise HTTPException(status_code=422, detail="Pick the player who'll compete." if team_size == 1 else f"Pick {team_size} players.")
+    return chosen
+
 async def register(user_id: str, public_id: str, body: Registration, db: AsyncSession) -> dict:
+    """
+    A team's owner or captain enters it with a full roster. In a solo event they pick one player
+    (themself or a teammate), and can enter other teammates as separate entries.
+    """
+
     event = await access.event_by_public_id(public_id, db, lock = True)
     bracket = await _bracket(event.id, db)
     # Sign-ups stay open while the host drafts the seeding; publishing rechecks the field.
@@ -629,74 +679,49 @@ async def register(user_id: str, public_id: str, body: Registration, db: AsyncSe
     if str(user_id) in await access.staff_accounts(event, db):
         raise HTTPException(status_code=409, detail="You're helping run this event, so you can't sign up for it.")
     _check_signup(event, body)
+    team, registrant = await _entering_team(user_id, body.team_id, event, db)
     entries = await access.entries_of(event.id, db)
-    has_room = event.max_entrants is None or sum(1 for e in entries if e.status == "signed_up") < event.max_entrants
+    solo = event.team_size == 1
+    if not solo and any(e.team_id == team.id for e in entries):
+        raise HTTPException(status_code=409, detail=f"{team.name} is already entered in this event.")
+    if event.max_entrants is not None and len(entries) >= event.max_entrants:
+        raise HTTPException(status_code=409, detail="This event is currently full.")
+    chosen = await _full_roster(team, body.players, event.team_size, db)
+    await _check_players(event, chosen, db)
 
-    if event.team_size == 1:
-        if body.team_id:
-            raise HTTPException(status_code=422, detail="This is a 1v1 event - sign up on your own.")
-        player = (await db.execute(
-            select(Profiles).where(Profiles.account_id == user_id).where(Profiles.type == "player")
-        )).scalars().first()
-        if not player:
-            raise HTTPException(status_code=403, detail="You need a player profile to sign up.")
-        if not has_room:
-            raise HTTPException(status_code=409, detail="This event is full.")
-        await _check_players(event, [player], db)
-        entry = BracketEntries(id = uuid.uuid4(), event_id = event.id, profile_id = player.id, team_id = None, name = player.username,
-                               status = "signed_up", email = body.email, answers = body.answers, pass_name = body.pass_name)
-        chosen, team_id = [player], None
-    else:
-        if not body.team_id:
-            raise HTTPException(status_code=422, detail=f"This is a {event.team_size}v{event.team_size} event - pick a team.")
-        team = (await db.execute(select(Teams).where(Teams.public_id == body.team_id))).scalars().first()
-        role = (await access.my_team_roles(user_id, db)).get(team.id) if team else None
-        if not team or role is None:
-            raise HTTPException(status_code=404, detail="Team not found.")
-        if role not in ("owner", "captain"):
-            raise HTTPException(status_code=403, detail="Only the team's owner or a captain can enter it.")
-        plays = (await db.execute(select(TeamGames.game_id).where(TeamGames.team_id == team.id).where(TeamGames.game_id == event.game_id))).first()
-        if not plays:
-            game = await db.get(Games, event.game_id)
-            raise HTTPException(status_code=409, detail=f"{team.name} doesn't play {game.name}. Add it to the team's games to enter.")
-        chosen = await _team_players(team, body.players, event.team_size, db)
-        await _check_players(event, chosen, db)
-        registrant = team.owner_profile_id if role == "owner" else (await db.execute(
-            select(Profiles.id).join(TeamMembers, TeamMembers.profile_id == Profiles.id)
-            .where(TeamMembers.team_id == team.id).where(Profiles.account_id == user_id)
-        )).scalar()
-        entry = BracketEntries(id = uuid.uuid4(), event_id = event.id, profile_id = registrant, team_id = team.id, name = team.name,
-                               status = "signed_up" if len(chosen) >= event.team_size and has_room else "pending",
-                               email = body.email, answers = body.answers, pass_name = body.pass_name)
-        team_id = team.id
-
+    entry = BracketEntries(id = uuid.uuid4(), event_id = event.id, profile_id = registrant, team_id = team.id,
+                           name = chosen[0].username if solo else team.name, status = "signed_up",
+                           email = body.email, answers = body.answers, pass_name = body.pass_name)
     db.add(entry)
     try:
         await db.flush()
-        db.add_all([BracketEntryPlayers(id = uuid.uuid4(), event_id = event.id, entry_id = entry.id, team_id = team_id, profile_id = p.id) for p in chosen])
+        db.add_all([BracketEntryPlayers(id = uuid.uuid4(), event_id = event.id, entry_id = entry.id, team_id = team.id, profile_id = p.id) for p in chosen])
         await db.commit()
     except IntegrityError:
         await db.rollback()
-        raise HTTPException(status_code=409, detail="Already signed up, or one of these players is already in this event.")
+        raise HTTPException(status_code=409, detail="One of these players is already in this event.")
     return await _event_out(event, user_id, db)
 
-async def set_players(user_id: str, public_id: str, player_ids: list[str], db: AsyncSession) -> dict:
+async def set_players(user_id: str, public_id: str, player_ids: list[str], db: AsyncSession, entrant_id: str | None = None) -> dict:
     """
-    The captain changes which of the team's players play, until the bracket is published.
+    The captain changes which of the team's players play, until the bracket is published. It's
+    always a full roster. entrant_id picks which entry when they have several (solo events).
     """
 
     event = await access.event_by_public_id(public_id, db, lock = True)
     bracket = await _bracket(event.id, db)
     if bracket and bracket.status != "draft":
         raise HTTPException(status_code=409, detail="The event has started, so its roster is locked.")
-    entry = await access.acting_entry(user_id, event, db)
-    if entry.team_id is None:
-        raise HTTPException(status_code=422, detail="Only team entries pick players.")
-    team = await db.get(Teams, entry.team_id)
-    chosen = await _team_players(team, player_ids, event.team_size, db)
+    entry = await access.acting_entry(user_id, event, db, [entrant_id] if entrant_id else None)
+    team = await db.get(Teams, entry.team_id) if entry.team_id else None
+    if team is None or (await access.my_team_roles(user_id, db)).get(team.id) not in ("owner", "captain"):
+        raise HTTPException(status_code=403, detail="Only the team's owner or a captain can pick its players.")
+    chosen = await _full_roster(team, player_ids, event.team_size, db)
     await _check_players(event, chosen, db, entry)
     await db.execute(delete(BracketEntryPlayers).where(BracketEntryPlayers.entry_id == entry.id))
     db.add_all([BracketEntryPlayers(id = uuid.uuid4(), event_id = event.id, entry_id = entry.id, team_id = team.id, profile_id = p.id) for p in chosen])
+    if event.team_size == 1:
+        entry.name = chosen[0].username
     try:
         await db.flush()
     except IntegrityError:
@@ -712,16 +737,20 @@ async def _remove_entry(event: BracketEvents, entry: BracketEntries, db: AsyncSe
     await _refresh_and_notify(event, await access.entries_of(event.id, db), db)
     await db.commit()
 
-async def unregister(user_id: str, public_id: str, db: AsyncSession) -> dict:
+async def unregister(user_id: str, public_id: str, db: AsyncSession, entrant_id: str | None = None) -> dict:
     """
-    Takes the signed in player out, or the team they own or captain.
+    Takes an entry out: the team's owner or a captain, or in a solo event the player themself.
+    entrant_id picks which entry when they have several.
     """
 
     event = await access.event_by_public_id(public_id, db, lock = True)
     bracket = await _bracket(event.id, db)
     if bracket and bracket.status != "draft":
         raise HTTPException(status_code=409, detail="The bracket is live - you can't unregister now.")
-    found = await access.viewer_entry(user_id, await access.entries_of(event.id, db), db)
+    entries = await access.entries_of(event.id, db)
+    if entrant_id:
+        entries = [e for e in entries if str(e.id) == entrant_id]
+    found = await access.viewer_entry(user_id, entries, db, solo = event.team_size == 1)
     if not found:
         raise HTTPException(status_code=404, detail="You're not signed up.")
     if not found[1]:
@@ -745,7 +774,8 @@ async def remove_entrant(user_id: str, public_id: str, entrant_id: uuid.UUID, db
 async def sync_team(team_id, db: AsyncSession) -> None:
     """
     After a team's members or name change: its entries in events that haven't started take the
-    new name, drop picked players who left the team, and move between signed up and pending.
+    new name (team events; solo entries are named after their player), drop picked players who
+    left the team, and move between signed up and needs players (keeping their spot).
     Events that have started keep their rosters as they were. The caller commits.
     """
 
@@ -757,13 +787,14 @@ async def sync_team(team_id, db: AsyncSession) -> None:
         bracket = await _bracket(entry.event_id, db)
         if bracket and bracket.status != "draft":
             continue
-        entry.name = team.name
+        event = await db.get(BracketEvents, entry.event_id)
+        if event.team_size > 1:
+            entry.name = team.name
         gone = delete(BracketEntryPlayers).where(BracketEntryPlayers.entry_id == entry.id)
         if members:
             gone = gone.where(or_(BracketEntryPlayers.profile_id.is_(None), BracketEntryPlayers.profile_id.not_in(members)))
         await db.execute(gone)
         await db.flush()
-        event = await db.get(BracketEvents, entry.event_id)
         await _refresh_and_notify(event, await access.entries_of(event.id, db), db)
 
 async def before_team_deleted(team_id, db: AsyncSession) -> list:
@@ -802,7 +833,7 @@ async def save_draft(user_id: str, public_id: str, seeds: list[str], db: AsyncSe
     entries = await access.entries_of(event.id, db)
     allowed = {str(e.id) for e in entries if e.status == "signed_up"}
     if len(set(seeds)) != len(seeds) or not set(seeds) <= allowed:
-        raise HTTPException(status_code=422, detail="Seeds must be signed-up entrants, each once. Pending teams can't be seeded.")
+        raise HTTPException(status_code=422, detail="Seeds must be signed-up entrants, each once. Entrants that still need players can't be seeded.")
     fmt = await lookups.bracket_format(event.format, db)
     if len(seeds) < fmt.min_entrants:
         raise HTTPException(status_code=422, detail=f"You need at least {fmt.min_entrants} entrants to build a bracket.")
@@ -822,8 +853,8 @@ async def _write_seeds(bracket: Brackets, seeds: list[str], db: AsyncSession) ->
 
 async def publish(user_id: str, public_id: str, db: AsyncSession) -> dict:
     """
-    Posts the bracket: rechecks the field, closes sign-ups, locks the event's rosters, creates the
-    matches and tells everyone with a match. If the field changed since the draft was seeded, the
+    Posts the bracket: rechecks the field (dropping entries that still need players), closes
+    sign-ups, locks the event's rosters, creates the matches and tells everyone with a match. If the field changed since the draft was seeded, the
     draft is rebuilt with the current entrants and sent back for review instead (409).
     """
 
@@ -836,6 +867,10 @@ async def publish(user_id: str, public_id: str, db: AsyncSession) -> dict:
 
     entries = await access.entries_of(event.id, db, lock = True)
     await _refresh_and_notify(event, entries, db)
+    short = [e for e in entries if e.status != "signed_up"]
+    if short:
+        await _drop_short_entries(event, short, db)
+        entries = [e for e in entries if e.status == "signed_up"]
     signed_up = [e for e in entries if e.status == "signed_up"]
     if event.min_entrants is not None and len(signed_up) < event.min_entrants:
         raise HTTPException(status_code=409, detail=(
@@ -865,21 +900,59 @@ async def publish(user_id: str, public_id: str, db: AsyncSession) -> dict:
     await db.commit()
     return await _event_out(event, user_id, db)
 
-async def reset_bracket(user_id: str, public_id: str, db: AsyncSession) -> dict:
+async def _drop_short_entries(event: BracketEvents, short: list[BracketEntries], db: AsyncSession) -> None:
     """
-    Throws the bracket away (draft or live, with its matches, reports and queue items) so the
-    event can be reseeded.
+    At publishing, entries still short of players are taken out and told why. The caller commits.
     """
 
-    event = await access.managed_event(user_id, public_id, db, lock = True)
-    bracket = await _bracket(event.id, db, lock = True)
+    accounts = await access.entry_accounts(short, db)
+    for entry in short:
+        notify(db, accounts.get(entry.id, ()), "entry_dropped", {
+            "event_id": event.public_id, "event_name": event.name, "team_name": entry.name,
+        })
+        await db.delete(entry)
+    await db.flush()
+
+async def _throw_away_bracket(event: BracketEvents, bracket: Brackets | None, db: AsyncSession) -> None:
     if bracket:
         await db.execute(delete(EventIssues).where(EventIssues.event_id == event.id))
         await db.delete(bracket)
         await db.flush()
     await _refresh_and_notify(event, await access.entries_of(event.id, db), db)
     await db.commit()
+
+async def reset_bracket(user_id: str, public_id: str, db: AsyncSession) -> dict:
+    """
+    Throws the draft seeding away so the event can be reseeded. Once the bracket is published the
+    host and admins can't reset it; only uSync staff can (admin_reset_bracket).
+    """
+
+    event = await access.managed_event(user_id, public_id, db, lock = True)
+    bracket = await _bracket(event.id, db, lock = True)
+    if bracket and bracket.status != "draft":
+        raise HTTPException(status_code=409, detail="The bracket is published, so it can't be reset. Contact uSync support if something's wrong with it.")
+    await _throw_away_bracket(event, bracket, db)
     return await _event_out(event, user_id, db)
+
+async def admin_reset_bracket(public_id: str, db: AsyncSession) -> None:
+    """
+    uSync staff only (the route requires an admins row): throws a published bracket away, with its
+    matches, reports and queue items, as long as no match has a result yet. Entries and rosters
+    stay; sign-ups stay closed until the host reopens them.
+    """
+
+    event = await access.event_by_public_id(public_id, db, lock = True)
+    bracket = await _bracket(event.id, db, lock = True)
+    if not bracket:
+        raise HTTPException(status_code=409, detail="This event has no bracket.")
+    played = (await db.execute(
+        select(BracketMatches.id).where(BracketMatches.bracket_id == bracket.id).where(BracketMatches.status == "complete")
+    )).first() or (await db.execute(
+        select(MatchReports.id).join(BracketMatches, BracketMatches.id == MatchReports.match_id).where(BracketMatches.bracket_id == bracket.id)
+    )).first()
+    if played:
+        raise HTTPException(status_code=409, detail="A match in this bracket already has a result, so it can't be reset.")
+    await _throw_away_bracket(event, bracket, db)
 
 # ---- admins ----------------------------------------------------------------------------
 #
