@@ -18,6 +18,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIASGIMiddleware
 
 from app.routers import tournaments
+from app.routers import wallet
 from app.routers import healthcheck
 from app.routers import events
 from app.routers import sitemap
@@ -109,3 +110,4 @@ app.include_router(event_claims.router)
 app.include_router(teams.router)
 app.include_router(brackets.router)
 app.include_router(brackets.notifications_router)
+app.include_router(wallet.router)

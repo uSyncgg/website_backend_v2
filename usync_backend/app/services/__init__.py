@@ -21,6 +21,15 @@ EVENT_TYPES = [
 ]
 
 PLATFORM_FEE_PERCENT = 5
+
+# Wallet deposits: at least $5, plus a 5% fee on top, and at most $1,000 in any 24 hours (pending
+# and succeeded deposits both count). Unpaid deposits are canceled after DEPOSIT_HOLD_MINUTES.
+DEPOSIT_MIN_CENTS = 500
+DEPOSIT_FEE_PERCENT = 5
+DEPOSIT_DAILY_LIMIT_CENTS = 100_000
+DEPOSIT_HOLD_MINUTES = 30
+# Where manual credits/debits and deposit refunds are reported (each one is also in the audit log).
+MONEY_ALERT_EMAIL = os.getenv("MONEY_ALERT_EMAIL", "contact@usync.gg")
 REGISTRATION_STATUSES = ["pending", "paid", "payment_failed", "canceled", "expired", "refunded"]
 
 # Unpaid registrations hold their pass slot for this long, then the background sweeper releases it.

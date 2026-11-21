@@ -10,6 +10,7 @@ from app.models.host_data import LanEvents
 from app.models.event_registration import EventRegistrations, EventPassTiers
 from app.services.event_registration import check_and_send, host_confirmation, get_pass_event_helper
 from app.services import STRIPE_WEBHOOK_SECRET
+from app.services import wallet
 from app.services.registration_holds import release_registration, RELEASED_STATUSES
 
 logger = logging.getLogger(__name__)
@@ -31,9 +32,15 @@ async def handle_stripe_webhook(payload: bytes, signature: str, db: AsyncSession
         raise HTTPException(status_code=400, detail="Invalid signature")
 
     stripe_object = event["data"]["object"]
-    # payment_intent.* events carry the PaymentIntent itself; charge.* events carry a Charge that
-    # points at its PaymentIntent.
+    # payment_intent.* events carry the PaymentIntent itself; charge.* events (including
+    # charge.dispute.*) carry a Charge or Dispute that points at its PaymentIntent.
     payment_intent_id = stripe_object["payment_intent"] if event["type"].startswith("charge.") else stripe_object["id"]
+
+    # Wallet deposits are their own PaymentIntents; everything else here is a LAN pass.
+    deposit = await wallet.deposit_for_payment_intent(payment_intent_id, db, lock = True) if payment_intent_id else None
+    if deposit is not None:
+        await wallet.handle_deposit_event(event["type"], deposit, db)
+        return {"status": "ok"}
 
     stmt = select(EventRegistrations).where(EventRegistrations.stripe_payment_intent_id == payment_intent_id)
     result = await db.execute(stmt)

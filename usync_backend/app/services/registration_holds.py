@@ -182,6 +182,10 @@ async def run_hold_sweeper(stripeClient: StripeClient) -> None:
             released = await expire_stale_holds(stripeClient)
             if released:
                 logger.info("Hold sweeper released %d registration(s)", released)
+            from app.services.wallet import expire_stale_deposits
+            canceled = await expire_stale_deposits(stripeClient)
+            if canceled:
+                logger.info("Hold sweeper canceled %d unpaid wallet deposit(s)", canceled)
         except Exception:
             logger.exception("Hold sweeper run failed")
 

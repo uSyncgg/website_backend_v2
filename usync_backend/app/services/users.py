@@ -33,6 +33,7 @@ from app.schemas.users import (
     OrgUpdate
 )
 from app.models.users import UsersParent, Profiles, ProfileLinks, Players, Hosts, Venues, Organizations
+from app.services.wallet import check_can_delete_account
 from app.services.pictures import PFP_BUCKET, process_pfp, copy_pfp, remove_pfps, storage_path
 from app.services.naming import (
     new_public_id, normalize_username, canonical_username, split_words, profanity_moderation,
@@ -896,6 +897,9 @@ async def delete_account(user_id: str, db: AsyncSession, supabase: AsyncClient) 
     App data goes first so a failure never leaves a public profile nobody can log into.
     Every step is safe to retry: a missing users row just deletes nothing.
     """
+
+    # Money first: a wallet that isn't empty (or is frozen) blocks deletion.
+    await check_can_delete_account(user_id, db)
 
     # Teams the account owns pass to another player instead of being deleted with it.
     profile_ids = set((await db.execute(select(Profiles.id).where(Profiles.account_id == user_id))).scalars().all())
