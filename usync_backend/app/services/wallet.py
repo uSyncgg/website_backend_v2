@@ -127,6 +127,10 @@ async def start_deposit(user_id: str, amount_cents: int, idempotency_key: str, d
     if existing is not None:
         if existing.wallet_id != wallet.id or existing.amount_cents != amount_cents:
             raise HTTPException(status_code=409, detail="This deposit was already started for a different amount. Close it and start again.")
+        if existing.status == "canceled":
+            # A dialog left open past the 30 minute hold: its PaymentIntent is gone. The browser
+            # makes a new key and starts over; the old deposit stays canceled.
+            raise HTTPException(status_code=410, detail="This deposit timed out. Press Continue to start a new one.")
         intent = await stripeClient.v1.payment_intents.retrieve_async(existing.stripe_payment_intent_id)
         return _deposit_out(existing, intent.client_secret)
 
