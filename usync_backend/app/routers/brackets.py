@@ -97,11 +97,12 @@ async def register(request: Request, response: Response, event_id: str, body: Re
 @router.put("/{event_id}/registration/players", response_model = EventOut)
 @limiter.limit(MODERATE)
 async def setPlayers(request: Request, response: Response, event_id: str, body: PlayersUpdate, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
-    return await svc.set_players(claims["sub"], event_id, body.players, db)
+    return await svc.set_players(claims["sub"], event_id, body.players, db, body.entrant_id)
 
 @router.delete("/{event_id}/registration", response_model = EventOut)
-async def unregister(event_id: str, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
-    return await svc.unregister(claims["sub"], event_id, db)
+async def unregister(event_id: str, entrant_id: str | None = Query(default = None, alias = "entrantId"),
+                     claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
+    return await svc.unregister(claims["sub"], event_id, db, entrant_id)
 
 # ---- bracket ---------------------------------------------------------------
 
