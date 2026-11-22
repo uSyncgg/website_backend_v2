@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.users import Profiles
 from app.models.teams import Teams, TeamMembers, TeamGames
 from app.models.games import Games, GameTitles, GameModes
+from app.models.wallet import LedgerAccounts
 from app.models.brackets import (
     BracketEvents, BracketEntries, BracketEntryPlayers, BracketEventAdmins, Brackets, BracketSeeds,
     BracketMatches, BracketFormats, MatchReports, MatchDecisions, EventIssues, Notifications,
@@ -71,11 +72,14 @@ async def _bracket(event_id, db: AsyncSession, lock: bool = False) -> Brackets |
     return (await db.execute(query)).scalars().first()
 
 def _stage(event: BracketEvents, bracket: Brackets | None) -> str:
+    return _stage_of(event, bracket.status if bracket else None)
+
+def _stage_of(event: BracketEvents, bracket_status: str | None) -> str:
     if event.cancelled_at is not None:
         return "cancelled"
-    if bracket is None:
+    if bracket_status is None:
         return "registration" if event.registration_open else "closed"
-    return {"draft": "seeding", "published": "live", "complete": "complete"}[bracket.status]
+    return {"draft": "seeding", "published": "live", "complete": "complete"}[bracket_status]
 
 def _payments_out(payments: dict | None, can_manage: bool) -> dict:
     """
@@ -442,6 +446,95 @@ async def profile_events(public_id: str, user_id: str | None, db: AsyncSession, 
 
     host = select(Profiles.id).where(Profiles.public_id == public_id)
     return await _page(BracketEvents.host_profile_id.in_(host), user_id, db, cursor, limit)
+
+# A Hosted Event whose start passed this long ago with no bracket published has been left
+# behind by its host; the game pages stop listing it (it stays reachable by its link).
+DISCOVER_GRACE = timedelta(hours = 24)
+
+def _after_soonest(cursor: str | None):
+    """
+    Keyset paging on (starts_at, id), soonest first: the mirror of _after.
+    """
+
+    if not cursor:
+        return None
+    try:
+        at, eid = cursor.split("|", 1)
+        at, eid = datetime.fromisoformat(at), uuid.UUID(eid)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Bad cursor.")
+    return or_(BracketEvents.starts_at > at, and_(BracketEvents.starts_at == at, BracketEvents.id > eid))
+
+async def discover_events(game_key: str, event_type: str, db: AsyncSession, cursor: str | None = None, limit: int = PAGE_SIZE) -> dict:
+    """
+    The Hosted Events a game's Leagues / LANs / Tournaments page lists, soonest first: every one of
+    that game and type that isn't cancelled or complete. One whose start is more than
+    DISCOVER_GRACE past without a published bracket is left out.
+    """
+
+    game = await lookups.game_by_key(game_key, db)
+    limit = max(1, min(limit, PAGE_SIZE))
+    query = (
+        select(BracketEvents, Brackets.status)
+        .outerjoin(Brackets, Brackets.event_id == BracketEvents.id)
+        .where(BracketEvents.game_id == game.id, BracketEvents.event_type == event_type, BracketEvents.cancelled_at.is_(None))
+        .where(or_(
+            Brackets.status == "published",
+            and_(or_(Brackets.id.is_(None), Brackets.status == "draft"), BracketEvents.starts_at >= _now() - DISCOVER_GRACE),
+        ))
+    )
+    after = _after_soonest(cursor)
+    if after is not None:
+        query = query.where(after)
+    rows = (await db.execute(query.order_by(BracketEvents.starts_at.asc(), BracketEvents.id.asc()).limit(limit + 1))).all()
+    more = len(rows) > limit
+    rows = rows[:limit]
+    if not rows:
+        return {"events": [], "nextCursor": None}
+
+    events = [r[0] for r in rows]
+    ids = [e.id for e in events]
+    format_labels = dict((await db.execute(select(BracketFormats.key, BracketFormats.label))).all())
+    title_ids = {e.game_title_id for e in events} - {None}
+    titles = dict((await db.execute(select(GameTitles.id, GameTitles.name).where(GameTitles.id.in_(title_ids)))).all()) if title_ids else {}
+    mode_ids = {e.game_mode_id for e in events} - {None}
+    modes = dict((await db.execute(select(GameModes.id, GameModes.name).where(GameModes.id.in_(mode_ids)))).all()) if mode_ids else {}
+    host_ids = {e.host_profile_id for e in events} - {None}
+    hosts = dict((await db.execute(select(Profiles.id, Profiles.public_id).where(Profiles.id.in_(host_ids)))).all()) if host_ids else {}
+    signed_up = dict((await db.execute(
+        select(BracketEntries.event_id, func.count()).where(BracketEntries.event_id.in_(ids), BracketEntries.status == "signed_up")
+        .group_by(BracketEntries.event_id)
+    )).all())
+    pools = dict((await db.execute(
+        select(LedgerAccounts.event_id, LedgerAccounts.balance_cents).where(LedgerAccounts.event_id.in_(ids), LedgerAccounts.type == money.POOL)
+    )).all())
+
+    out = []
+    for event, bracket_status in rows:
+        out.append({
+            "id": event.public_id,
+            "name": event.name,
+            "eventType": event.event_type,
+            "hostProfile": hosts.get(event.host_profile_id),
+            "game": game.name,
+            "gameTitle": titles.get(event.game_title_id, ""),
+            "gameMode": modes.get(event.game_mode_id, ""),
+            "format": event.format,
+            "formatLabel": format_labels.get(event.format, event.format),
+            "teamSize": f"{event.team_size}v{event.team_size}",
+            "startsAt": _iso(event.starts_at),
+            "platform": event.platform,
+            "locationType": event.location_type,
+            "venue": event.venue,
+            "entryFeeCents": event.entry_fee_cents,
+            "prizeFunding": event.prize_funding,
+            "guaranteeCents": event.guarantee_cents,
+            "poolCents": pools.get(event.id, 0),
+            "signedUp": signed_up.get(event.id, 0),
+            "maxEntrants": event.max_entrants,
+            "stage": _stage_of(event, bracket_status),
+        })
+    return {"events": out, "nextCursor": _cursor(events[-1]) if more else None}
 
 # ---- host: the event --------------------------------------------------------------
 

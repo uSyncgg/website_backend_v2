@@ -285,6 +285,38 @@ class EventPage(Out):
     events: list[EventSummary]
     nextCursor: str | None
 
+class HostedEventCard(Out):
+    """
+    A Hosted Event as the public game pages list it. Public on purpose: nothing host-only
+    (open issues, admin flags, the viewer's entry) and nothing the event page wouldn't show.
+    """
+
+    id: str
+    name: str
+    eventType: str
+    hostProfile: str | None
+    game: str
+    gameTitle: str
+    gameMode: str
+    format: str
+    formatLabel: str
+    teamSize: str
+    startsAt: str
+    platform: str
+    locationType: str
+    venue: str
+    entryFeeCents: int | None
+    prizeFunding: str | None
+    guaranteeCents: int | None
+    poolCents: int
+    signedUp: int
+    maxEntrants: int | None
+    stage: str
+
+class HostedEventPage(Out):
+    events: list[HostedEventCard]
+    nextCursor: str | None
+
 class IssueOut(Out):
     id: str
     type: str

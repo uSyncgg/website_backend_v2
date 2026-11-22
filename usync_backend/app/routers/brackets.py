@@ -1,5 +1,7 @@
 import uuid
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, Query, Request, Response
 from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,7 +10,7 @@ from app.core.limiter import limiter, MODERATE
 from app.schemas.brackets import (
     EventCreate, EventUpdate, EventDelay, Registration, PlayersUpdate, SeedsUpdate, MatchScore, Ruling,
     NotificationsRead, AdminInvite, AdminResponse, AutoPayRequest,
-    EventOut, EventPage, QueueOut, ClaimOut, AdminInviteOut, NotificationOut, MetaOut,
+    EventOut, EventPage, HostedEventPage, QueueOut, ClaimOut, AdminInviteOut, NotificationOut, MetaOut,
 )
 from app.services import brackets as svc
 from app.services import event_issues
@@ -51,6 +53,18 @@ async def respondAdminInvite(invite_id: uuid.UUID, body: AdminResponse, claims: 
 @router.get("/profile/{public_id}", response_model = EventPage)
 async def getProfileEvents(public_id: str, cursor: str | None = None, limit: int = Query(50, ge = 1, le = 50), claims: dict | None = Depends(optional_supabase_jwt), db: AsyncSession = Depends(get_db)):
     return await svc.profile_events(public_id, _uid(claims), db, cursor, limit)
+
+@router.get("/discover", response_model = HostedEventPage)
+async def getDiscoverEvents(
+    game: str,
+    type: Literal["league", "lan", "tournament"],
+    cursor: str | None = None,
+    limit: int = Query(6, ge = 1, le = 50),
+    db: AsyncSession = Depends(get_db),
+):
+    # Public: the Hosted Events a game's Leagues / LANs / Tournaments page lists. Declared
+    # before /{event_id} so "discover" isn't read as an event id.
+    return await svc.discover_events(game, type, db, cursor, limit)
 
 @router.get("/{event_id}", response_model = EventOut)
 async def getEvent(event_id: str, claims: dict | None = Depends(optional_supabase_jwt), db: AsyncSession = Depends(get_db)):

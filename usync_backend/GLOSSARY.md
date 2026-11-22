@@ -4,6 +4,16 @@ uSync is an esports platform where hosts run events and teams of players sign up
 
 ## Language
 
+### Events
+
+**Hosted Event**:
+A league, LAN or tournament a host runs on uSync, with its sign-ups and bracket here. It's listed on its game's pages from the moment it's created until it completes or is cancelled.
+_Avoid_: Bracket event, posted event, user event
+
+**Listed Event**:
+A league, LAN or tournament run somewhere else that uSync lists and links out to, either scraped or submitted and approved by uSync staff.
+_Avoid_: External event, directory event, verified event
+
 ### Wallet
 
 **Wallet**:
