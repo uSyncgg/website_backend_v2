@@ -15,7 +15,8 @@ from app.models.admin import AdminAuditLog
 from app.models.brackets import BracketEvents
 from app.models.wallet import Wallets, LedgerAccounts, LedgerTransactions, LedgerLines, Deposits
 from app.services import (
-    STRIPE_CURRENCY, STRIPE_PAYMENT_METHOD_TYPES, DEPOSIT_MIN_CENTS, DEPOSIT_FEE_PERCENT, DEPOSIT_DAILY_LIMIT_CENTS,
+    STRIPE_CURRENCY, STRIPE_PAYMENT_METHOD_TYPES, DEPOSIT_MIN_CENTS, DEPOSIT_FEE_PERCENT, DEPOSIT_FEE_SMALL_MAX_CENTS,
+    DEPOSIT_FEE_SMALL_PERCENT, DEPOSIT_FEE_SMALL_FLAT_CENTS, DEPOSIT_DAILY_LIMIT_CENTS,
     DEPOSIT_HOLD_MINUTES, MONEY_ALERT_EMAIL,
 )
 from app.services import ledger
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 # Wallets: what a user sees, deposits through Stripe, chargebacks, and uSync staff's money tools.
 #
 # A deposit: POST /wallet/deposits makes a 'pending' deposits row and a PaymentIntent for the
-# amount plus the 5% fee. The browser pays it with the Payment Element. Only Stripe's webhook
+# amount plus the fee (see deposit_fee). The browser pays it with the Payment Element. Only Stripe's webhook
 # (payment_intent.succeeded) credits the wallet: external -total, Deposited Funds +amount,
 # platform revenue +fee, in one ledger transaction. Unpaid deposits are canceled after 30 minutes.
 #
@@ -42,7 +43,12 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 def deposit_fee(amount_cents: int) -> int:
-    """5% of the deposit, rounded half up to the cent ($12.34 -> 62c)."""
+    """
+    The fee on top of a deposit, percentages rounded half up to the cent:
+    up to $15 it's 3% + 30c ($10.00 -> 60c), over $15 it's 5% ($20.00 -> $1.00).
+    """
+    if amount_cents <= DEPOSIT_FEE_SMALL_MAX_CENTS:
+        return (amount_cents * DEPOSIT_FEE_SMALL_PERCENT + 50) // 100 + DEPOSIT_FEE_SMALL_FLAT_CENTS
     return (amount_cents * DEPOSIT_FEE_PERCENT + 50) // 100
 
 def _money(cents: int) -> str:
