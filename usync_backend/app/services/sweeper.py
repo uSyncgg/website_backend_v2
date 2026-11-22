@@ -6,6 +6,7 @@ from sqlalchemy import delete, select, text
 from app.core.db import AsyncSessionLocal
 from app.models.teams import TeamInvites
 from app.services import event_issues
+from app.services import event_money
 from app.services import matches
 from app.services.notifications import delete_old_read
 
@@ -17,7 +18,10 @@ logger = logging.getLogger(__name__)
 # - admin queue claims older than 10 minutes go back to open, and queue items whose match now has
 #   a result close themselves;
 # - read notifications older than 90 days, and answered team invites older than 90 days, are
-#   deleted.
+#   deleted;
+# - events with money that reach their start time short of their minimum entrants are cancelled
+#   and everyone is refunded (each event row-locked with SKIP LOCKED, so a request working on it
+#   isn't waited on; the next tick picks it up).
 #
 # Each run takes a transaction-level advisory lock first, so with several workers (or several
 # servers) only one does the work each minute; the others skip that tick.
@@ -33,6 +37,7 @@ async def sweep_once() -> None:
             return
         raised = await matches.flag_one_sided_reports(db)
         stalled = await matches.flag_stalled_matches(db)
+        cancelled = await event_money.auto_cancel_due(db)
         await event_issues.housekeep(db)
         removed = await delete_old_read(db)
         cutoff = datetime.now(timezone.utc) - timedelta(days = INVITE_RETENTION_DAYS)
@@ -40,9 +45,9 @@ async def sweep_once() -> None:
             delete(TeamInvites).where(TeamInvites.status != "pending").where(TeamInvites.responded_at < cutoff)
         )).rowcount or 0
         await db.commit()
-        if raised or stalled or removed or invites:
-            logger.info("Bracket sweep: %s one-sided reports and %s stalled matches queued, %s notifications and %s invites deleted.",
-                        raised, stalled, removed, invites)
+        if raised or stalled or removed or invites or cancelled:
+            logger.info("Bracket sweep: %s one-sided reports and %s stalled matches queued, %s notifications and %s invites deleted, "
+                        "%s events cancelled below their minimum.", raised, stalled, removed, invites, cancelled)
 
 async def run_bracket_sweeper() -> None:
     while True:

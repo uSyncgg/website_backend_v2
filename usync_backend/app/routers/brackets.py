@@ -7,7 +7,7 @@ from app.core.dependencies import get_db, verify_supabase_jwt, optional_supabase
 from app.core.limiter import limiter, MODERATE
 from app.schemas.brackets import (
     EventCreate, EventUpdate, EventDelay, Registration, PlayersUpdate, SeedsUpdate, MatchScore, Ruling,
-    NotificationsRead, AdminInvite, AdminResponse,
+    NotificationsRead, AdminInvite, AdminResponse, AutoPayRequest,
     EventOut, EventPage, QueueOut, ClaimOut, AdminInviteOut, NotificationOut, MetaOut,
 )
 from app.services import brackets as svc
@@ -69,6 +69,15 @@ async def updateEvent(event_id: str, body: EventUpdate, claims: dict = Depends(v
 async def deleteEvent(event_id: str, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
     await svc.delete_event(claims["sub"], event_id, db)
 
+@router.post("/{event_id}/cancel", response_model = EventOut)
+@limiter.limit(MODERATE)
+async def cancelEvent(request: Request, response: Response, event_id: str, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
+    """
+    The host calls the event off: every entry fee and the guaranteed prize are refunded. Final.
+    """
+
+    return await svc.cancel_event(claims["sub"], event_id, db)
+
 @router.post("/{event_id}/delays", response_model = EventOut)
 @limiter.limit(MODERATE)
 async def delayEvent(request: Request, response: Response, event_id: str, body: EventDelay, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
@@ -93,6 +102,11 @@ async def removeEntrant(event_id: str, entrant_id: uuid.UUID, claims: dict = Dep
 @limiter.limit(MODERATE)
 async def register(request: Request, response: Response, event_id: str, body: Registration, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
     return await svc.register(claims["sub"], event_id, body, db)
+
+@router.post("/{event_id}/auto-pay-requests", status_code = 204)
+@limiter.limit(MODERATE)
+async def requestAutoPay(request: Request, response: Response, event_id: str, body: AutoPayRequest, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
+    await svc.request_auto_pay(claims["sub"], event_id, body.team_id, body.players, db)
 
 @router.put("/{event_id}/registration/players", response_model = EventOut)
 @limiter.limit(MODERATE)

@@ -38,4 +38,4 @@ from app.models.host_data import EventFormParent, LanEvents, LeagueEvents, XpEve
 from app.models.event_registration import PassPools, EventPassTiers, EventRegistrations
 from app.models.event_claims import EventClaims
 from app.models.admin import Admins, AdminAuditLog
-from app.models.wallet import Wallets, LedgerAccounts, LedgerTransactions, LedgerLines, Deposits
+from app.models.wallet import Wallets, LedgerAccounts, LedgerTransactions, LedgerLines, Deposits, EntryPayments

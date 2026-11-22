@@ -8,7 +8,7 @@ from app.core.limiter import limiter, MODERATE
 from app.schemas.admin import AdminAccountsOut, AdminAnalyticsOut, AdminEventsOut
 from app.services.admin import get_admin_accounts, get_admin_analytics, get_admin_events
 from app.services.brackets import admin_reset_bracket
-from app.schemas.wallet import AdminWalletOut, ManualMoveIn, DepositRefundIn
+from app.schemas.wallet import AdminWalletOut, ManualMoveIn, DepositRefundIn, EventCancelIn
 from app.services import wallet as wallet_svc
 
 # Admin dashboard, admins only (the admins table; every allowed request is in admin_audit_log).
@@ -60,6 +60,16 @@ async def adminResetBracket(request: Request, response: Response, event_id: str,
     await admin_reset_bracket(event_id, db)
 
 # ---- wallet tools (admins with can_manage_money) ----------------------------------------
+
+@router.post("/events/{event_id}/cancel")
+@limiter.limit(MODERATE)
+async def adminCancelEvent(request: Request, response: Response, event_id: str, body: EventCancelIn,
+                           claims: dict = Depends(require_money_admin), db: AsyncSession = Depends(get_db)) -> dict:
+    """
+    Cancels an event and refunds every entry fee and the guaranteed prize. Audit logged.
+    """
+
+    return await wallet_svc.admin_cancel_event(claims, event_id, body.reason, db)
 
 @router.get("/wallets", response_model=AdminWalletOut)
 @limiter.limit(MODERATE)

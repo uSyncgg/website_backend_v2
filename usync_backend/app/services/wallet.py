@@ -12,6 +12,7 @@ from stripe import StripeClient
 from app.core.db import AsyncSessionLocal
 from app.models.users import UsersParent
 from app.models.admin import AdminAuditLog
+from app.models.brackets import BracketEvents
 from app.models.wallet import Wallets, LedgerAccounts, LedgerTransactions, LedgerLines, Deposits
 from app.services import (
     STRIPE_CURRENCY, STRIPE_PAYMENT_METHOD_TYPES, DEPOSIT_MIN_CENTS, DEPOSIT_FEE_PERCENT, DEPOSIT_DAILY_LIMIT_CENTS,
@@ -60,6 +61,7 @@ async def _wallet_out(wallet: Wallets, db: AsyncSession) -> dict:
         "totalCents": deposited + earnings,
         "frozen": wallet.frozen_at is not None,
         "frozenAt": wallet.frozen_at.isoformat() if wallet.frozen_at else None,
+        "autoPayUntil": wallet.auto_pay_until.isoformat() if wallet.auto_pay_until and wallet.auto_pay_until > _now() else None,
     }
 
 async def my_wallet(user_id: str, db: AsyncSession) -> dict:
@@ -73,9 +75,10 @@ async def history(user_id: str, db: AsyncSession, before: int | None = None, lim
 
     wallet = await ledger.wallet_of(user_id, db)
     query = (
-        select(LedgerLines, LedgerTransactions, LedgerAccounts.type)
+        select(LedgerLines, LedgerTransactions, LedgerAccounts.type, BracketEvents.public_id, BracketEvents.name)
         .join(LedgerTransactions, LedgerTransactions.id == LedgerLines.transaction_id)
         .join(LedgerAccounts, LedgerAccounts.id == LedgerLines.ledger_account_id)
+        .outerjoin(BracketEvents, BracketEvents.id == LedgerTransactions.event_id)
         .where(LedgerAccounts.wallet_id == wallet.id)
         .order_by(LedgerLines.id.desc())
         .limit(limit + 1)
@@ -92,8 +95,10 @@ async def history(user_id: str, db: AsyncSession, before: int | None = None, lim
             "createdAt": txn.created_at.isoformat(),
             # Staff write the reason for manual changes; the reference (a wire number) stays internal.
             "reason": txn.reason,
+            "eventId": event_public_id,
+            "eventName": event_name,
         }
-        for line, txn, type_ in rows[:limit]
+        for line, txn, type_, event_public_id, event_name in rows[:limit]
     ]
     return {"items": items, "nextBefore": items[-1]["id"] if len(rows) > limit else None}
 
@@ -337,6 +342,18 @@ async def _alert(subject: str, rows: dict) -> None:
 
 def _audit(db: AsyncSession, admin: dict, action: str, details: dict) -> None:
     db.add(AdminAuditLog(admin_id = uuid.UUID(admin["sub"]), admin_email = admin.get("email") or "", action = action, details = details))
+
+async def admin_cancel_event(admin: dict, public_id: str, reason: str, db: AsyncSession) -> dict:
+    """
+    Staff cancel an event and refund everyone (finished or not, e.g. a broken event that can't
+    pay out). Repeating it does nothing more. Audit logged.
+    """
+
+    from app.services.brackets import admin_cancel_event as cancel  # brackets doesn't import this module
+    event = await cancel(public_id, db)
+    _audit(db, admin, "event_cancel", {"event_id": public_id, "event_name": event.name, "reason": reason})
+    await db.commit()
+    return {"id": event.public_id, "cancelledAt": event.cancelled_at.isoformat() if event.cancelled_at else None}
 
 async def manual_move(admin: dict, email: str, direction: str, amount_cents: int, reason: str, reference: str,
                       idempotency_key: str, db: AsyncSession) -> dict:

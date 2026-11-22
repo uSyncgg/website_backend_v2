@@ -30,6 +30,14 @@ class BracketEvents(Base):
     SQL Alchemy model describing the bracket_events table: an event a host or venue profile runs
     on uSync (a league, LAN or tournament) with its sign-ups and bracket.
 
+    Money (see GLOSSARY.md): entry_fee_cents is what one player pays (null = free); prize_funding
+    is 'guaranteed' (the host pays guarantee_cents when sign-ups open) or 'entry_funded' (the prize
+    pool is the event pool after the platform fee and host_cut_bps); payout_structure splits the
+    prize pool by placement in basis points. Postgres checks the combination
+    (ck_bracket_events_money) and the payout structure (payout_structure_valid). An event that
+    ever held money is cancelled (cancelled_at), never deleted; host_profile_id is nulled if its
+    host profile is deleted afterwards.
+
     The game is a lookup (games / game_titles / game_modes). Its bracket, seeds and matches are
     their own tables (brackets, bracket_seeds, bracket_matches).
     """
@@ -38,7 +46,7 @@ class BracketEvents(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
     public_id: Mapped[str] = mapped_column()
-    host_profile_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("profiles.id", ondelete = "CASCADE"), index = True)
+    host_profile_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("profiles.id", ondelete = "SET NULL"), nullable = True, index = True)
     name: Mapped[str] = mapped_column()
     event_type: Mapped[str] = mapped_column()
     # A title only exists for some games. The mode becomes required once modes are seeded.
@@ -66,12 +74,36 @@ class BracketEvents(Base):
     signup_form: Mapped[dict] = mapped_column(JSONB, default = dict, server_default = text("'{}'::jsonb"))
     delays: Mapped[list] = mapped_column(JSONB, default = list, server_default = text("'[]'::jsonb"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = text("now()"))
+    entry_fee_cents: Mapped[int | None] = mapped_column(nullable = True)
+    prize_funding: Mapped[str | None] = mapped_column(nullable = True)
+    guarantee_cents: Mapped[int | None] = mapped_column(nullable = True)
+    host_cut_bps: Mapped[int | None] = mapped_column(SmallInteger, nullable = True)
+    payout_structure: Mapped[list | None] = mapped_column(JSONB, nullable = True)
+    platform_fee_bps: Mapped[int] = mapped_column(SmallInteger, default = 500, server_default = text("500"))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone = True), nullable = True)
+    cancel_reason: Mapped[str | None] = mapped_column(nullable = True)
 
     __table_args__ = (
         UniqueConstraint("public_id", name = "uq_bracket_events_public_id"),
         CheckConstraint("event_type IN ('league', 'lan', 'tournament')", name = "ck_bracket_events_type"),
         CheckConstraint("platform IN ('pc_allowed', 'console_only')", name = "ck_bracket_events_platform"),
         CheckConstraint("team_size BETWEEN 1 AND 10", name = "ck_bracket_events_team_size"),
+        CheckConstraint("entry_fee_cents IS NULL OR entry_fee_cents BETWEEN 100 AND 50000", name = "ck_bracket_events_entry_fee"),
+        CheckConstraint("guarantee_cents IS NULL OR (guarantee_cents > 0 AND guarantee_cents % 100 = 0)", name = "ck_bracket_events_guarantee"),
+        CheckConstraint("host_cut_bps IS NULL OR host_cut_bps BETWEEN 0 AND 5000", name = "ck_bracket_events_host_cut"),
+        CheckConstraint("platform_fee_bps BETWEEN 0 AND 10000", name = "ck_bracket_events_platform_fee"),
+        CheckConstraint("payout_structure_valid(payout_structure)", name = "ck_bracket_events_payout_structure"),
+        CheckConstraint(
+            "(prize_funding IS NULL AND entry_fee_cents IS NULL AND guarantee_cents IS NULL AND host_cut_bps IS NULL AND payout_structure IS NULL)"
+            " OR (prize_funding = 'entry_funded' AND entry_fee_cents IS NOT NULL AND guarantee_cents IS NULL AND host_cut_bps IS NOT NULL AND payout_structure IS NOT NULL)"
+            " OR (prize_funding = 'guaranteed' AND guarantee_cents IS NOT NULL AND host_cut_bps IS NULL AND payout_structure IS NOT NULL)",
+            name = "ck_bracket_events_money",
+        ),
+        CheckConstraint("entry_fee_cents IS NULL OR payments->'enabled' IS DISTINCT FROM 'true'::jsonb", name = "ck_bracket_events_no_passes_with_fee"),
+        CheckConstraint(
+            "(cancelled_at IS NULL) = (cancel_reason IS NULL) AND (cancel_reason IS NULL OR cancel_reason IN ('host', 'min_entrants', 'admin'))",
+            name = "ck_bracket_events_cancelled",
+        ),
     )
 
 class BracketEntries(Base):
@@ -105,9 +137,13 @@ class BracketEntries(Base):
     answers: Mapped[dict] = mapped_column(JSONB, default = dict, server_default = text("'{}'::jsonb"))
     pass_name: Mapped[str | None] = mapped_column(nullable = True)
     registered_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = text("now()"))
+    # How its entry fees are paid: 'team' (the captain, one payment) or 'each' (every picked
+    # player, one payment each). Null in free events.
+    pay_mode: Mapped[str | None] = mapped_column(nullable = True)
 
     __table_args__ = (
         CheckConstraint("status IN ('signed_up', 'needs_players')", name = "ck_bracket_entries_status"),
+        CheckConstraint("pay_mode IS NULL OR pay_mode IN ('team', 'each')", name = "ck_bracket_entries_pay_mode"),
     )
 
 class BracketEntryPlayers(Base):

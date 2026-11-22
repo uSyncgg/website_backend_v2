@@ -14,6 +14,7 @@ class WalletOut(Out):
     totalCents: int
     frozen: bool
     frozenAt: str | None
+    autoPayUntil: str | None = None
 
 class WalletLineOut(Out):
     id: int
@@ -22,6 +23,9 @@ class WalletLineOut(Out):
     amountCents: int
     createdAt: str
     reason: str | None
+    # Entry fees, refunds and guarantees: the event they were for.
+    eventId: str | None = None
+    eventName: str | None = None
 
 class WalletHistoryOut(Out):
     items: list[WalletLineOut]
@@ -50,6 +54,13 @@ class ManualMoveIn(CamelModel):
     reference: str = Field(min_length = 1, max_length = 200)
     # One per form submission: a double click or retry posts once.
     idempotency_key: str = Field(min_length = 16, max_length = 100, pattern = r"^[A-Za-z0-9-]+$")
+
+class EventCancelIn(CamelModel):
+    reason: str = Field(min_length = 3, max_length = 500)
+
+class AutoPayIn(CamelModel):
+    # 7, 30 or 90 days from now; 0 turns it off.
+    days: int = Field(ge = 0, le = 90)
 
 class DepositRefundIn(CamelModel):
     reason: str = Field(default = "", max_length = 500)

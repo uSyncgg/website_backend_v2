@@ -17,13 +17,21 @@ from app.services.naming import account_profile_ids
 
 my_profile_ids = account_profile_ids
 
-async def event_by_public_id(public_id: str, db: AsyncSession, lock: bool = False) -> BracketEvents:
+async def event_by_public_id(public_id: str, db: AsyncSession, lock: bool = False, allow_cancelled: bool = False) -> BracketEvents:
+    """
+    The event, row-locked when lock = True. Every change to an event locks it first, so a locked
+    read of a cancelled event is refused here (409): a cancelled event is read-only. Cancelling
+    itself passes allow_cancelled so a repeat is a no-op.
+    """
+
     query = select(BracketEvents).where(BracketEvents.public_id == public_id)
     if lock:
         query = query.with_for_update()
     event = (await db.execute(query)).scalars().first()
     if not event:
         raise HTTPException(status_code=404, detail="Event not found.")
+    if lock and event.cancelled_at is not None and not allow_cancelled:
+        raise HTTPException(status_code=409, detail="This event was cancelled.")
     return event
 
 async def admin_event_ids(user_id: str | None, db: AsyncSession) -> set:

@@ -33,7 +33,23 @@ class SignupForm(CamelModel):
 
 Restriction = Annotated[str, StringConstraints(strip_whitespace = True, min_length = 1, max_length = 200)]
 
-class EventCreate(CamelModel):
+class MoneySettings(CamelModel):
+    """
+    An event's entry fee and prize (GLOSSARY.md). All optional: leaving them out is a free event.
+    The service checks the combination (app.services.event_money.money_settings).
+    """
+
+    # Per player, in cents; 0 or null = free entry.
+    entry_fee_cents: int | None = Field(default = None, ge = 0, le = 50_000)
+    prize_funding: Literal["guaranteed", "entry_funded"] | None = None
+    # Guaranteed events: whole dollars, in cents.
+    guarantee_cents: int | None = Field(default = None, gt = 0, le = 10_000_000)
+    # Entry-funded events: the host's cut of the pool after the platform fee, in basis points.
+    host_cut_bps: int | None = Field(default = None, ge = 0, le = 5_000)
+    # The prize pool's split by placement, in basis points (100 = 1%), adding up to 10000.
+    payout_structure: list[int] | None = Field(default = None, min_length = 1, max_length = 16)
+
+class EventCreate(MoneySettings):
     host_profile: str
     name: str = Field(min_length = 1, max_length = 80)
     event_type: str = Field(pattern = "^(league|lan|tournament)$")
@@ -60,7 +76,7 @@ class EventCreate(CamelModel):
     payments: dict = Field(default_factory = dict)
     signup_form: SignupForm = Field(default_factory = SignupForm)
 
-class EventUpdate(CamelModel):
+class EventUpdate(MoneySettings):
     name: str | None = Field(default = None, min_length = 1, max_length = 80)
     description: str | None = Field(default = None, max_length = 5000)
     rules: str | None = Field(default = None, max_length = 5000)
@@ -88,6 +104,9 @@ class Registration(CamelModel):
     email: str = Field(max_length = 200)
     answers: dict[str, str] = Field(default_factory = dict)
     pass_name: str | None = Field(default = None, alias = "pass", max_length = 80)
+    # Events with an entry fee: 'team' (the captain pays for everyone) or 'each' (every player
+    # pays their own; needs Auto-Pay on for everyone but the captain).
+    pay_mode: Literal["team", "each"] | None = None
 
     @field_validator("email")
     @classmethod
@@ -103,6 +122,11 @@ class Registration(CamelModel):
         if len(v) > 30 or any(len(k) > 120 or len(x) > 1000 for k, x in v.items()):
             raise ValueError("Answers are too long.")
         return {k: x.strip() for k, x in v.items()}
+
+class AutoPayRequest(CamelModel):
+    # The team asking, and the teammates (profile public ids) to ask to turn Auto-Pay on.
+    team_id: str = Field(min_length = 1, max_length = 64)
+    players: list[str] = Field(min_length = 1, max_length = 10)
 
 class PlayersUpdate(CamelModel):
     players: list[str] = Field(max_length = 10)
@@ -150,6 +174,8 @@ class EntrantOut(Out):
     players: list[ProfileRef]
     roster: list[str]
     rosterSize: int
+    payMode: str | None = None
+    paidPlayers: list[str] = []
     # Only for the host, admins and the entrant's own captain / player.
     email: str | None = None
     answers: dict[str, str] | None = None
@@ -207,8 +233,12 @@ class EventOut(Out):
     delays: list[dict[str, Any]]
     createdAt: str | None
     stage: str
-    hostProfile: str
-    host: ProfileRef
+    # Null once the host's profile is deleted (only finished or cancelled events outlive it).
+    hostProfile: str | None
+    host: ProfileRef | None
+    # entryFeeCents, prizeFunding, guaranteeCents, guaranteeFunded, hostCutBps, payoutStructure,
+    # platformFeeBps, poolCents, cancelledAt, cancelReason.
+    money: dict[str, Any]
     entrants: list[EntrantOut]
     canManage: bool
     isHost: bool
@@ -232,6 +262,9 @@ class EventSummary(Out):
     stage: str
     hostProfile: str | None
     maxEntrants: int | None
+    entryFeeCents: int | None = None
+    prizeFunding: str | None = None
+    guaranteeCents: int | None = None
     signedUp: int
     needsPlayers: int
     pending: int
