@@ -155,6 +155,7 @@ async def _match_views(event: BracketEvents, rows: list, viewer: tuple | None, c
             "issues": sorted(types),
             "noShowUnlocksAt": _iso(unlocks),
             "disputeClosesAt": _iso(closes),
+            "canAct": acting,  # may report / claim a no-show / dispute this match, when the time is right
             "canReport": acting and state in ("ready", "awaiting"),
             "canReportNoShow": acting and state in ("ready", "awaiting") and unlocks is not None and now >= unlocks,
             "canDispute": acting and closes is not None and now <= closes and r.id not in my_disputes and not (following & touched),
