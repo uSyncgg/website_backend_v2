@@ -22,10 +22,10 @@ EVENT_TYPES = [
 
 PLATFORM_FEE_PERCENT = 5
 
-# Wallet deposits: at least $5, plus a 5% fee on top, and at most $1,000 in any 24 hours (pending
+# Wallet deposits: at least $5, plus a 10% fee on top, and at most $1,000 in any 24 hours (pending
 # and succeeded deposits both count). Unpaid deposits are canceled after DEPOSIT_HOLD_MINUTES.
 DEPOSIT_MIN_CENTS = 500
-DEPOSIT_FEE_PERCENT = 5
+DEPOSIT_FEE_PERCENT = 10
 DEPOSIT_DAILY_LIMIT_CENTS = 100_000
 DEPOSIT_HOLD_MINUTES = 30
 # Withdrawals: any amount of Earnings from $1, or all of them (the only option below $1).

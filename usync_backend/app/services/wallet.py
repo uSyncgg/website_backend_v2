@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # Wallets: what a user sees, deposits through Stripe, chargebacks, and uSync staff's money tools.
 #
 # A deposit: POST /wallet/deposits makes a 'pending' deposits row and a PaymentIntent for the
-# amount plus the 5% fee. The browser pays it with the Payment Element. Only Stripe's webhook
+# amount plus the 10% fee. The browser pays it with the Payment Element. Only Stripe's webhook
 # (payment_intent.succeeded) credits the wallet: external -total, Deposited Funds +amount,
 # platform revenue +fee, in one ledger transaction. Unpaid deposits are canceled after 30 minutes.
 #
