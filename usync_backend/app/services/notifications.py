@@ -9,8 +9,9 @@ from app.models.brackets import Notifications
 # table and shown alongside); these are everything else. Types and their `data`:
 #
 #   team_joined       { team_id, team_name, who }                     someone accepted an invite to your team
-#   team_signed_up    { event_id, event_name, team_name }             your pending team now has enough players
-#   team_pending      { event_id, event_name, team_name, have, need }  your team dropped below the team size
+#   team_signed_up    { event_id, event_name, team_name }             your entry has its full roster again
+#   team_pending      { event_id, event_name, team_name, have, need }  your entry lost a player; pick another (it keeps its spot)
+#   entry_dropped     { event_id, event_name, team_name }             the bracket was published while your entry was still short
 #   event_delayed     { event_id, event_name, starts_at, reason }
 #   match_ready       { event_id, event_name, match_id, opponent }    you have a match to play
 #   opponent_reported { event_id, event_name, match_id, opponent }    the other side reported a score - confirm yours
@@ -19,6 +20,8 @@ from app.models.brackets import Notifications
 #   issue_opened      { event_id, event_name, issue_type, label, match_id, summary }   host / admins: something's in the queue
 #   admin_joined      { event_id, event_name, player }                 your admin invite was accepted
 #   team_ownership    { team_id, team_name }                            you now own a team
+#   prize_paid        { event_id, event_name, amount_cents, placement }  your prize is in your Earnings
+#   host_payout       { event_id, event_name, amount_cents }             host: your share is in your Earnings
 #
 # Each user reads only their own rows. The browser gets them live over Supabase Realtime (the
 # notifications_select_own RLS policy), and through GET /notifications on load. Reading or

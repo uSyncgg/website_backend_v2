@@ -10,7 +10,8 @@ from app.services import bracket_access as access
 from app.services.notifications import notify
 
 # The per-event admin queue. Anything that needs the host or an admin - a disputed score, a
-# one-sided report nobody answered for 5 minutes, a no-show, a dispute after a team advanced -
+# one-sided report nobody answered for 5 minutes, a no-show, a dispute after a team advanced, a
+# match nobody has reported for an hour (a week in leagues) -
 # goes in as an issue, oldest first, and the host and admins are notified. Only they see it.
 #
 # Every state change is one conditional UPDATE, so concurrent clicks can't both win:
@@ -26,9 +27,11 @@ LABELS = {
     "one_sided_report": "One-sided report",
     "no_show": "No-show reported",
     "post_advancement_dispute": "Dispute after advancing",
+    "stalled_match": "No result reported",
+    "admin_requested": "Admin called to match chat",
 }
 # Types that are settled once their match has a result.
-SETTLED_BY_RESULT = ("dispute", "one_sided_report", "no_show")
+SETTLED_BY_RESULT = ("dispute", "one_sided_report", "no_show", "stalled_match")
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)

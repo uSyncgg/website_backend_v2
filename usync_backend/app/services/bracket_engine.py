@@ -345,30 +345,88 @@ def match_links(fmt: str, seed_count: int) -> dict:
     return links
 
 
-def placements(fmt: str, built: dict) -> list | None:
+def _rank(keys: dict) -> list[tuple[str, int]]:
     """
-    Final placings once the event is decided: [1st, 2nd, 3rd] (3rd may be None).
-    - Single elim: 3rd is the semifinal loser who lost to the champion.
-    - Double elim: 2nd is the grand final loser, 3rd the losers final loser.
-    - Round robin / swiss: the top three in the standings once every match is played.
+    [(entrant, placement)] from {entrant: key}, best first: an entrant's placement is 1 + how many
+    entrants have a strictly higher key, so equal keys share a placement (two 5ths, then 7th).
+    """
+
+    ordered = sorted(keys.items(), key = lambda kv: -kv[1])
+    return [(eid, 1 + sum(1 for other in keys.values() if other > key)) for eid, key in ordered]
+
+
+def _elim_keys(rounds: list[list[dict]], start: int = 0) -> dict:
+    """
+    {entrant: round index + start} for everyone knocked out by a played match in these rounds.
+    """
+
+    out = {}
+    for r, matches in enumerate(rounds):
+        for m in matches:
+            if m["status"] == "complete" and is_entrant(m.get("loser")):
+                out[m["loser"]] = r + start
+    return out
+
+
+def final_standings(fmt: str, seeds: list, built: dict) -> list[tuple[str, int]] | None:
+    """
+    Every entrant's final placement once the event is decided (None before), best first.
+    Entrants knocked out at the same stage share a placement.
+    - Single elim: 1st the champion, 2nd the finalist, 3rd the semifinal loser who lost to the
+      champion, 4th the other semifinal loser (if the champion had a semifinal bye, the only
+      semifinal loser is 3rd); earlier rounds share (quarterfinal losers are all 5th, ...).
+    - Double elim: 1st the champion, 2nd the grand final loser, 3rd the losers final loser, 4th
+      the losers semifinal loser; earlier losers rounds share.
+    - Round robin / swiss: by wins, then score difference; entrants equal on both share.
     """
 
     if fmt in ("round_robin", "swiss"):
         done, total = progress(built)
         if not total or done < total:
             return None
-        return [row["id"] for row in built["standings"][:3]]
-    if not built.get("champion"):
+        rows = built["standings"]
+        return [(row["id"], 1 + sum(1 for o in rows if (o["wins"], o["diff"]) > (row["wins"], row["diff"]))) for row in rows]
+    champion = built.get("champion")
+    if not champion:
         return None
     if fmt == "double_elim":
+        lr = built.get("losersRounds", [])
+        keys = _elim_keys(lr)
         gf = built["grandFinal"][-1]
-        lf = built["losersRounds"][-1][0] if built["losersRounds"] else None
-        second = gf["loser"] if gf["status"] == "complete" else None
-        third = lf["loser"] if lf and is_entrant(lf.get("loser")) else None
-        return [built["champion"], second, third]
-    rounds = built["rounds"]
-    final = rounds[-1][0]
-    semis = rounds[-2] if len(rounds) >= 2 else []
-    champions_semi = next((m for m in semis if m["winner"] == built["champion"]), None)
-    third = champions_semi["loser"] if champions_semi and is_entrant(champions_semi.get("loser")) else None
-    return [built["champion"], final["loser"], third]
+        if gf["status"] == "complete" and is_entrant(gf.get("loser")):
+            keys[gf["loser"]] = len(lr)
+        keys[champion] = len(lr) + 1
+    else:
+        rounds = built["rounds"]
+        keys = _elim_keys(rounds)
+        if len(rounds) >= 2:
+            champions_semi = next((m for m in rounds[-2] if m["winner"] == champion), None)
+            if champions_semi and champions_semi["status"] == "complete":
+                keys[champions_semi["loser"]] = len(rounds) - 2 + 0.5
+        keys[champion] = len(rounds)
+    # Anyone the matches don't place (not possible in a finished bracket) goes last.
+    for sid in seeds:
+        keys.setdefault(sid, -1)
+    return _rank(keys)
+
+
+def placements(fmt: str, built: dict, seeds: list | None = None) -> list | None:
+    """
+    The podium for display once the event is decided: [1st, 2nd, 3rd] from final_standings (3rd
+    may be None). In round robin / swiss, entrants sharing a place are listed by seed.
+    """
+
+    standings = final_standings(fmt, seeds if seeds is not None else _entrants(built), built)
+    if standings is None:
+        return None
+    ids = [eid for eid, _ in standings[:3]]
+    return ids + [None] * (3 - len(ids))
+
+
+def _entrants(built: dict) -> list:
+    seen = []
+    for m in all_matches(built):
+        for side in ("a", "b"):
+            if is_entrant(m.get(side)) and m[side] not in seen:
+                seen.append(m[side])
+    return seen

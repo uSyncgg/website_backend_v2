@@ -13,6 +13,7 @@ from app.schemas.brackets import MatchScore, Ruling
 from app.services import bracket_access as access
 from app.services import bracket_sync as bsync
 from app.services import event_issues as issues
+from app.services import match_chats
 from app.services.notifications import notify
 
 # Playing the bracket: reports, no-shows, disputes and the host's / admins' rulings.
@@ -37,6 +38,10 @@ from app.services.notifications import notify
 # logged in match_decisions with the result before and after.
 
 REPORT_WINDOW_MINUTES = 5
+# A ready match nobody has reported goes in the admin queue after this long (leagues play matches
+# days apart, so they get much longer).
+STALLED_MATCH_MINUTES = 60
+STALLED_LEAGUE_MATCH_MINUTES = 7 * 24 * 60
 DISPUTE_WINDOW_MINUTES = 5
 
 def _now() -> datetime:
@@ -90,11 +95,12 @@ async def _open_dispute(db: AsyncSession, match: BracketMatches) -> bool:
 
 async def notify_ready(db: AsyncSession, event: BracketEvents, ready: list[BracketMatches]) -> None:
     """
-    Tells both sides of every match that just became playable.
+    Tells both sides of every match that just became playable, and opens its match chat.
     """
 
     if not ready:
         return
+    await match_chats.open_for_ready(db, event, ready)
     ids = {x for m in ready for x in (m.entry_a_id, m.entry_b_id) if x}
     entries = {e.id: e for e in (await db.execute(select(BracketEntries).where(BracketEntries.id.in_(ids)))).scalars().all()}
     accounts = await access.entry_accounts(list(entries.values()), db)
@@ -125,8 +131,8 @@ async def _settle(db: AsyncSession, event: BracketEvents, bracket: Brackets, row
 async def report(user_id: str, public_id: str, code: str, body: MatchScore, db: AsyncSession) -> BracketEvents:
     event = await access.event_by_public_id(public_id, db, lock = True)
     bracket, rows = await _live(event, db)
-    me = await access.acting_entry(user_id, event, db)
     match = _match(rows, code)
+    me = await access.acting_entry(user_id, event, db, (match.entry_a_id, match.entry_b_id))
     if match.status != "ready" or me.id not in (match.entry_a_id, match.entry_b_id):
         raise HTTPException(status_code=409, detail="You can only report your own match while it's being played.")
     if match.locked:
@@ -173,8 +179,8 @@ async def report(user_id: str, public_id: str, code: str, body: MatchScore, db: 
 async def report_no_show(user_id: str, public_id: str, code: str, db: AsyncSession) -> BracketEvents:
     event = await access.event_by_public_id(public_id, db, lock = True)
     _, rows = await _live(event, db)
-    me = await access.acting_entry(user_id, event, db)
     match = _match(rows, code)
+    me = await access.acting_entry(user_id, event, db, (match.entry_a_id, match.entry_b_id))
     if match.status != "ready" or me.id not in (match.entry_a_id, match.entry_b_id):
         raise HTTPException(status_code=409, detail="You can only report a no-show in your own match.")
     unlocks = no_show_unlocks_at(event, match)
@@ -204,8 +210,8 @@ async def dispute_after_advancing(user_id: str, public_id: str, code: str, db: A
 
     event = await access.event_by_public_id(public_id, db, lock = True)
     _, rows = await _live(event, db)
-    me = await access.acting_entry(user_id, event, db)
     match = _match(rows, code)
+    me = await access.acting_entry(user_id, event, db, (match.entry_a_id, match.entry_b_id))
     if me.id not in (match.entry_a_id, match.entry_b_id):
         raise HTTPException(status_code=403, detail="Only the two sides of a match can dispute it.")
     closes = dispute_closes_at(match)
@@ -380,3 +386,35 @@ async def flag_one_sided_reports(db: AsyncSession) -> int:
             raised += 1
     return raised
 
+
+async def flag_stalled_matches(db: AsyncSession) -> int:
+    """
+    A ready match with no report from either side, ready for longer than the event type's
+    stalled window: put it in the queue (once per match, even if it's dismissed). Returns how
+    many were raised. The caller commits.
+    """
+
+    now = _now()
+    reported = select(MatchReports.match_id)
+    flagged = select(EventIssues.match_id).where(EventIssues.type == "stalled_match")
+    candidates = (await db.execute(
+        select(BracketMatches, BracketEvents)
+        .join(Brackets, Brackets.id == BracketMatches.bracket_id)
+        .join(BracketEvents, BracketEvents.id == Brackets.event_id)
+        .where(BracketMatches.status == "ready").where(BracketMatches.ready_at.is_not(None))
+        .where(BracketMatches.ready_at < now - timedelta(minutes = STALLED_MATCH_MINUTES))
+        .where(BracketMatches.id.not_in(reported)).where(BracketMatches.id.not_in(flagged))
+    )).all()
+    raised = 0
+    for match, event in candidates:
+        minutes = STALLED_LEAGUE_MATCH_MINUTES if event.event_type == "league" else STALLED_MATCH_MINUTES
+        if match.ready_at > now - timedelta(minutes = minutes):
+            continue
+        sides = await _sides(db, match)
+        names = " vs ".join(sides[e].name for e in (match.entry_a_id, match.entry_b_id) if e in sides)
+        waited = "7 days" if event.event_type == "league" else f"{STALLED_MATCH_MINUTES} minutes"
+        if await issues.open_issue(db, event, match, "stalled_match", None, {
+            "summary": f"{names}: nobody has reported a result in {waited}.",
+        }):
+            raised += 1
+    return raised

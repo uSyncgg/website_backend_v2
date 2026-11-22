@@ -16,6 +16,8 @@ class Admins(Base):
     __tablename__ = "admins"
 
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete = "CASCADE"), primary_key = True)
+    # Allowed to move money by hand (manual credits/debits, deposit refunds). Set by hand too.
+    can_manage_money: Mapped[bool] = mapped_column(default = False, server_default = text("false"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = text("now()"))
 
 class AdminAuditLog(Base):

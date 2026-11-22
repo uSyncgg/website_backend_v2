@@ -33,7 +33,23 @@ class SignupForm(CamelModel):
 
 Restriction = Annotated[str, StringConstraints(strip_whitespace = True, min_length = 1, max_length = 200)]
 
-class EventCreate(CamelModel):
+class MoneySettings(CamelModel):
+    """
+    An event's entry fee and prize (GLOSSARY.md). All optional: leaving them out is a free event.
+    The service checks the combination (app.services.event_money.money_settings).
+    """
+
+    # Per player, in cents; 0 or null = free entry.
+    entry_fee_cents: int | None = Field(default = None, ge = 0, le = 50_000)
+    prize_funding: Literal["guaranteed", "entry_funded"] | None = None
+    # Guaranteed events: whole dollars, in cents.
+    guarantee_cents: int | None = Field(default = None, gt = 0, le = 10_000_000)
+    # Entry-funded events: the host's cut of the pool after the platform fee, in basis points.
+    host_cut_bps: int | None = Field(default = None, ge = 0, le = 5_000)
+    # The prize pool's split by placement, in basis points (100 = 1%), adding up to 10000.
+    payout_structure: list[int] | None = Field(default = None, min_length = 1, max_length = 16)
+
+class EventCreate(MoneySettings):
     host_profile: str
     name: str = Field(min_length = 1, max_length = 80)
     event_type: str = Field(pattern = "^(league|lan|tournament)$")
@@ -60,7 +76,7 @@ class EventCreate(CamelModel):
     payments: dict = Field(default_factory = dict)
     signup_form: SignupForm = Field(default_factory = SignupForm)
 
-class EventUpdate(CamelModel):
+class EventUpdate(MoneySettings):
     name: str | None = Field(default = None, min_length = 1, max_length = 80)
     description: str | None = Field(default = None, max_length = 5000)
     rules: str | None = Field(default = None, max_length = 5000)
@@ -80,13 +96,17 @@ class EventDelay(CamelModel):
     reason: str = Field(default = "", max_length = 300)
 
 class Registration(CamelModel):
+    # Every entry comes from a team (its public id), entered by its owner or a captain.
     team_id: str | None = None
-    # Team events: the players the captain picks (profile public ids). Fewer than the team size
-    # leaves the team pending until the captain picks the rest.
+    # Exactly the event's team size in players from the team (profile public ids); in a solo event
+    # the one player who'll compete, the captain or a teammate.
     players: list[str] = Field(default_factory = list, max_length = 10)
     email: str = Field(max_length = 200)
     answers: dict[str, str] = Field(default_factory = dict)
     pass_name: str | None = Field(default = None, alias = "pass", max_length = 80)
+    # Events with an entry fee: 'team' (the captain pays for everyone) or 'each' (every player
+    # pays their own; needs Auto-Pay on for everyone but the captain).
+    pay_mode: Literal["team", "each"] | None = None
 
     @field_validator("email")
     @classmethod
@@ -103,8 +123,15 @@ class Registration(CamelModel):
             raise ValueError("Answers are too long.")
         return {k: x.strip() for k, x in v.items()}
 
+class AutoPayRequest(CamelModel):
+    # The team asking, and the teammates (profile public ids) to ask to turn Auto-Pay on.
+    team_id: str = Field(min_length = 1, max_length = 64)
+    players: list[str] = Field(min_length = 1, max_length = 10)
+
 class PlayersUpdate(CamelModel):
     players: list[str] = Field(max_length = 10)
+    # Which entry, when the account acts for several (a team's entries in a solo event).
+    entrant_id: str | None = None
 
 class SeedsUpdate(CamelModel):
     seeds: list[str] = Field(max_length = 1024)
@@ -143,9 +170,12 @@ class EntrantOut(Out):
     status: str
     registeredAt: str | None
     teamId: str | None
+    teamName: str | None = None
     players: list[ProfileRef]
     roster: list[str]
     rosterSize: int
+    payMode: str | None = None
+    paidPlayers: list[str] = []
     # Only for the host, admins and the entrant's own captain / player.
     email: str | None = None
     answers: dict[str, str] | None = None
@@ -203,8 +233,15 @@ class EventOut(Out):
     delays: list[dict[str, Any]]
     createdAt: str | None
     stage: str
-    hostProfile: str
-    host: ProfileRef
+    # Null once the host's profile is deleted (only finished or cancelled events outlive it).
+    hostProfile: str | None
+    host: ProfileRef | None
+    # entryFeeCents, prizeFunding, guaranteeCents, guaranteeFunded, hostCutBps, payoutStructure,
+    # platformFeeBps, poolCents, cancelledAt, cancelReason, payoutDueAt, paidOutAt.
+    money: dict[str, Any]
+    # Final placements once the bracket is complete, best first: [{entrantId, placement,
+    # prizeCents}]. Entrants can share a placement; prizeCents is set once the event pays out.
+    standings: list[dict[str, Any]] = []
     entrants: list[EntrantOut]
     canManage: bool
     isHost: bool
@@ -212,6 +249,7 @@ class EventOut(Out):
     openIssues: int
     viewerEntrantId: str | None
     viewerCanAct: bool
+    viewerActsFor: list[str] = []
     bracket: BracketOut | None
 
 class EventSummary(Out):
@@ -227,7 +265,11 @@ class EventSummary(Out):
     stage: str
     hostProfile: str | None
     maxEntrants: int | None
+    entryFeeCents: int | None = None
+    prizeFunding: str | None = None
+    guaranteeCents: int | None = None
     signedUp: int
+    needsPlayers: int
     pending: int
     canManage: bool
     isHost: bool
@@ -237,9 +279,43 @@ class EventSummary(Out):
     viewerMatch: dict[str, Any] | None
     winner: str | None
     viewerPlace: int | None
+    viewerPrizeCents: int | None = None
 
 class EventPage(Out):
     events: list[EventSummary]
+    nextCursor: str | None
+
+class HostedEventCard(Out):
+    """
+    A Hosted Event as the public game pages list it. Public on purpose: nothing host-only
+    (open issues, admin flags, the viewer's entry) and nothing the event page wouldn't show.
+    """
+
+    id: str
+    name: str
+    eventType: str
+    hostProfile: str | None
+    hostName: str | None
+    game: str
+    gameTitle: str
+    gameMode: str
+    format: str
+    formatLabel: str
+    teamSize: str
+    startsAt: str
+    platform: str
+    locationType: str
+    venue: str
+    entryFeeCents: int | None
+    prizeFunding: str | None
+    guaranteeCents: int | None
+    poolCents: int
+    signedUp: int
+    maxEntrants: int | None
+    stage: str
+
+class HostedEventPage(Out):
+    events: list[HostedEventCard]
     nextCursor: str | None
 
 class IssueOut(Out):

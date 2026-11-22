@@ -1,5 +1,7 @@
 import uuid
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, Query, Request, Response
 from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -7,11 +9,13 @@ from app.core.dependencies import get_db, verify_supabase_jwt, optional_supabase
 from app.core.limiter import limiter, MODERATE
 from app.schemas.brackets import (
     EventCreate, EventUpdate, EventDelay, Registration, PlayersUpdate, SeedsUpdate, MatchScore, Ruling,
-    NotificationsRead, AdminInvite, AdminResponse,
-    EventOut, EventPage, QueueOut, ClaimOut, AdminInviteOut, NotificationOut, MetaOut,
+    NotificationsRead, AdminInvite, AdminResponse, AutoPayRequest,
+    EventOut, EventPage, HostedEventPage, QueueOut, ClaimOut, AdminInviteOut, NotificationOut, MetaOut,
 )
 from app.services import brackets as svc
 from app.services import event_issues
+from app.services import match_chats
+from app.schemas.chats import ChatOut
 from app.services.lookups import bracket_meta
 from app.services.notifications import list_notifications, mark_read
 
@@ -50,6 +54,18 @@ async def respondAdminInvite(invite_id: uuid.UUID, body: AdminResponse, claims: 
 async def getProfileEvents(public_id: str, cursor: str | None = None, limit: int = Query(50, ge = 1, le = 50), claims: dict | None = Depends(optional_supabase_jwt), db: AsyncSession = Depends(get_db)):
     return await svc.profile_events(public_id, _uid(claims), db, cursor, limit)
 
+@router.get("/discover", response_model = HostedEventPage)
+async def getDiscoverEvents(
+    game: str,
+    type: Literal["league", "lan", "tournament"],
+    cursor: str | None = None,
+    limit: int = Query(6, ge = 1, le = 50),
+    db: AsyncSession = Depends(get_db),
+):
+    # Public: the Hosted Events a game's Leagues / LANs / Tournaments page lists. Declared
+    # before /{event_id} so "discover" isn't read as an event id.
+    return await svc.discover_events(game, type, db, cursor, limit)
+
 @router.get("/{event_id}", response_model = EventOut)
 async def getEvent(event_id: str, claims: dict | None = Depends(optional_supabase_jwt), db: AsyncSession = Depends(get_db)):
     return await svc.get_event(event_id, _uid(claims), db)
@@ -68,6 +84,15 @@ async def updateEvent(event_id: str, body: EventUpdate, claims: dict = Depends(v
 @router.delete("/{event_id}", status_code = 204)
 async def deleteEvent(event_id: str, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
     await svc.delete_event(claims["sub"], event_id, db)
+
+@router.post("/{event_id}/cancel", response_model = EventOut)
+@limiter.limit(MODERATE)
+async def cancelEvent(request: Request, response: Response, event_id: str, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
+    """
+    The host calls the event off: every entry fee and the guaranteed prize are refunded. Final.
+    """
+
+    return await svc.cancel_event(claims["sub"], event_id, db)
 
 @router.post("/{event_id}/delays", response_model = EventOut)
 @limiter.limit(MODERATE)
@@ -94,14 +119,20 @@ async def removeEntrant(event_id: str, entrant_id: uuid.UUID, claims: dict = Dep
 async def register(request: Request, response: Response, event_id: str, body: Registration, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
     return await svc.register(claims["sub"], event_id, body, db)
 
+@router.post("/{event_id}/auto-pay-requests", status_code = 204)
+@limiter.limit(MODERATE)
+async def requestAutoPay(request: Request, response: Response, event_id: str, body: AutoPayRequest, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
+    await svc.request_auto_pay(claims["sub"], event_id, body.team_id, body.players, db)
+
 @router.put("/{event_id}/registration/players", response_model = EventOut)
 @limiter.limit(MODERATE)
 async def setPlayers(request: Request, response: Response, event_id: str, body: PlayersUpdate, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
-    return await svc.set_players(claims["sub"], event_id, body.players, db)
+    return await svc.set_players(claims["sub"], event_id, body.players, db, body.entrant_id)
 
 @router.delete("/{event_id}/registration", response_model = EventOut)
-async def unregister(event_id: str, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
-    return await svc.unregister(claims["sub"], event_id, db)
+async def unregister(event_id: str, entrant_id: str | None = Query(default = None, alias = "entrantId"),
+                     claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
+    return await svc.unregister(claims["sub"], event_id, db, entrant_id)
 
 # ---- bracket ---------------------------------------------------------------
 
@@ -143,6 +174,17 @@ async def getDecisions(event_id: str, claims: dict = Depends(verify_supabase_jwt
 @router.post("/{event_id}/decisions/{decision_id}/revert", response_model = EventOut)
 async def revertDecision(event_id: str, decision_id: uuid.UUID, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
     return await svc.revert(claims["sub"], event_id, decision_id, db)
+
+# ---- match chats ---------------------------------------------------------------
+
+@router.post("/{event_id}/matches/{match_id}/chat/join", response_model = ChatOut)
+async def joinMatchChat(event_id: str, match_id: str, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
+    return await match_chats.join(claims["sub"], event_id, match_id, db)
+
+@router.post("/{event_id}/matches/{match_id}/call-admin", response_model = ChatOut)
+@limiter.limit(MODERATE)
+async def callAdmin(request: Request, response: Response, event_id: str, match_id: str, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
+    return await match_chats.call_admin(claims["sub"], event_id, match_id, db)
 
 # ---- the admin queue ---------------------------------------------------------
 

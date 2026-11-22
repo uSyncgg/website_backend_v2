@@ -44,7 +44,7 @@ class UsersParent(Base):
 class Profiles(Base):
     """
     SQL Alchemy model describing the profiles table. One row per public profile; an account has
-    at most one profile of each type. The type's own details live in players, hosts or venues.
+    at most one profile of each type. The type's own details live in players, hosts, venues or organizations.
     """
 
     __tablename__ = "profiles"
@@ -136,6 +136,8 @@ class Organizations(Base):
     """
     SQL Alchemy model describing the organizations table: the details of an org profile. An org
     runs teams (app.models.teams) and enters them in events, but doesn't post events itself.
+    `organization` mirrors the profile's username (an org's name is its username); it's kept in
+    step whenever the username changes. `verified` is set by uSync, never by the org.
     """
 
     __tablename__ = "organizations"
