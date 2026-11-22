@@ -53,6 +53,8 @@ class BracketEvents(Base):
     game_id: Mapped[int] = mapped_column(SmallInteger, ForeignKey("games.id", ondelete = "RESTRICT"), index = True)
     game_title_id: Mapped[int | None] = mapped_column(ForeignKey("game_titles.id", ondelete = "RESTRICT"), nullable = True)
     game_mode_id: Mapped[int | None] = mapped_column(ForeignKey("game_modes.id", ondelete = "RESTRICT"), nullable = True)
+    # Required (by the API) once the game has rulesets; null for games without any.
+    ruleset_id: Mapped[int | None] = mapped_column(ForeignKey("rulesets.id", ondelete = "RESTRICT"), nullable = True)
     format: Mapped[str] = mapped_column(ForeignKey("bracket_formats.key", ondelete = "RESTRICT"))
     team_size: Mapped[int] = mapped_column()
     best_of: Mapped[int] = mapped_column()
@@ -67,6 +69,7 @@ class BracketEvents(Base):
     entry_fee: Mapped[str] = mapped_column(default = "Free", server_default = text("'Free'"))
     prize: Mapped[str] = mapped_column(default = "", server_default = text("''"))
     description: Mapped[str] = mapped_column(default = "", server_default = text("''"))
+    # Free-text rules from before rulesets. No longer written or shown; kept until a cleanup drops it.
     rules: Mapped[str] = mapped_column(default = "", server_default = text("''"))
     registration_open: Mapped[bool] = mapped_column(default = True, server_default = text("true"))
     no_show_minutes: Mapped[int | None] = mapped_column(nullable = True)

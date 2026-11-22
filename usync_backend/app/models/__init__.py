@@ -17,7 +17,7 @@ from app.models.users import (
     Venues,
     Organizations
 )
-from app.models.games import Games, GameTitles, GameModes, GameTitleModes
+from app.models.games import Games, GameTitles, GameModes, GameTitleModes, Rulesets
 from app.models.teams import Teams, TeamGames, TeamMembers, TeamInvites
 from app.models.brackets import (
     BracketFormats,

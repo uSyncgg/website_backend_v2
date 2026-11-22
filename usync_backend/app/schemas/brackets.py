@@ -56,6 +56,7 @@ class EventCreate(MoneySettings):
     game: str = Field(min_length = 1, max_length = 60, description = "A game key from /brackets/meta")
     game_title: str | None = Field(default = None, max_length = 80, description = "A title key, for games that have titles")
     game_mode: str | None = Field(default = None, max_length = 80, description = "A mode key, for games that have modes")
+    ruleset: str | None = Field(default = None, max_length = 80, description = "A ruleset key from /brackets/meta, for games that have rulesets")
     format: str = Field(min_length = 1, max_length = 40)
     team_size: str = Field(pattern = "^([1-9]|10)v([1-9]|10)$")
     best_of: int = Field(ge = 1, le = 9)
@@ -70,6 +71,7 @@ class EventCreate(MoneySettings):
     entry_fee: str = Field(default = "Free", max_length = 40)
     prize: str = Field(default = "", max_length = 200)
     description: str = Field(default = "", max_length = 5000)
+    # Ignored: hosts pick a ruleset instead. Still accepted so older clients don't get a 422.
     rules: str = Field(default = "", max_length = 5000)
     registration_open: bool = True
     no_show_minutes: int | None = Field(default = None, ge = 0, le = 240)
@@ -79,7 +81,10 @@ class EventCreate(MoneySettings):
 class EventUpdate(MoneySettings):
     name: str | None = Field(default = None, min_length = 1, max_length = 80)
     description: str | None = Field(default = None, max_length = 5000)
+    # Ignored, as on EventCreate.
     rules: str | None = Field(default = None, max_length = 5000)
+    # Can change only while the bracket is a draft (dropped after, like best_of).
+    ruleset: str | None = Field(default = None, max_length = 80)
     prize: str | None = Field(default = None, max_length = 200)
     venue: str | None = Field(default = None, max_length = 200)
     best_of: int | None = Field(default = None, ge = 1, le = 9)
@@ -225,7 +230,10 @@ class EventOut(Out):
     entryFee: str
     prize: str
     description: str
+    # Old free text, kept for clients that still read it; new events leave it empty.
     rules: str
+    # {key, name, url}; null for games without rulesets.
+    ruleset: dict[str, str] | None
     registrationOpen: bool
     noShowMinutes: int | None
     payments: dict[str, Any]
