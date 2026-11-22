@@ -21,6 +21,7 @@ from app.services import event_issues as issues
 from app.services import lookups
 from app.services import event_money as money
 from app.services import matches as play
+from app.services import match_chats
 from app.services.naming import new_public_id, moderate_name
 from app.services.notifications import notify
 
@@ -122,6 +123,7 @@ async def _match_views(event: BracketEvents, rows: list, viewer: tuple | None, c
             .where(EventIssues.type == "post_advancement_dispute")
         )).scalars().all())
 
+    chat_ids = await match_chats.open_chat_ids(event.id, db)
     now = _now()
     out = {}
     touched = {r.id for r in rows if r.status == "complete" or r.id in reports}
@@ -153,11 +155,13 @@ async def _match_views(event: BracketEvents, rows: list, viewer: tuple | None, c
             "issues": sorted(types),
             "noShowUnlocksAt": _iso(unlocks),
             "disputeClosesAt": _iso(closes),
+            "canAct": acting,  # may report / claim a no-show / dispute this match, when the time is right
             "canReport": acting and state in ("ready", "awaiting"),
             "canReportNoShow": acting and state in ("ready", "awaiting") and unlocks is not None and now >= unlocks,
             "canDispute": acting and closes is not None and now <= closes and r.id not in my_disputes and not (following & touched),
         }
         if can_manage or mine:
+            view["chatId"] = str(chat_ids[r.id]) if r.id in chat_ids else None
             view["reports"] = {str(e): {"scoreA": x.score_a, "scoreB": x.score_b, "at": _iso(x.created_at)} for e, x in rep.items()}
         out[r.code] = view
     return out
@@ -183,6 +187,8 @@ async def _event_out(event: BracketEvents, user_id: str | None, db: AsyncSession
     can_manage = is_host or any(a.status == "accepted" and p.id in mine for a, p in admin_rows)
     solo = event.team_size == 1
     viewer = await access.viewer_entry(user_id, entries, db, roles, solo = solo)
+    # In matches every picked player can report and dispute, not just the owner and captains.
+    match_viewer = await access.viewer_entry(user_id, entries, db, roles, solo = solo, players_act = True)
     playing = {x.id for x in entries for _, p in players.get(x.id, []) if p is not None and p.id in mine}
     # Every entrant the viewer can act for: a captain can have several in a solo event.
     acts_for = [
@@ -226,7 +232,7 @@ async def _event_out(event: BracketEvents, user_id: str | None, db: AsyncSession
             "format": bracket.format,
             "seeds": seeds,
             "built": bsync.built_with_rows(bracket.format, seeds, rows),
-            "matches": await _match_views(event, rows, viewer, can_manage, db) if rows else {},
+            "matches": await _match_views(event, rows, match_viewer, can_manage, db) if rows else {},
         }
 
     game = await db.get(Games, event.game_id)

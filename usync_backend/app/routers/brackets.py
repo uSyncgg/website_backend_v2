@@ -12,6 +12,8 @@ from app.schemas.brackets import (
 )
 from app.services import brackets as svc
 from app.services import event_issues
+from app.services import match_chats
+from app.schemas.chats import ChatOut
 from app.services.lookups import bracket_meta
 from app.services.notifications import list_notifications, mark_read
 
@@ -158,6 +160,17 @@ async def getDecisions(event_id: str, claims: dict = Depends(verify_supabase_jwt
 @router.post("/{event_id}/decisions/{decision_id}/revert", response_model = EventOut)
 async def revertDecision(event_id: str, decision_id: uuid.UUID, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
     return await svc.revert(claims["sub"], event_id, decision_id, db)
+
+# ---- match chats ---------------------------------------------------------------
+
+@router.post("/{event_id}/matches/{match_id}/chat/join", response_model = ChatOut)
+async def joinMatchChat(event_id: str, match_id: str, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
+    return await match_chats.join(claims["sub"], event_id, match_id, db)
+
+@router.post("/{event_id}/matches/{match_id}/call-admin", response_model = ChatOut)
+@limiter.limit(MODERATE)
+async def callAdmin(request: Request, response: Response, event_id: str, match_id: str, claims: dict = Depends(verify_supabase_jwt), db: AsyncSession = Depends(get_db)):
+    return await match_chats.call_admin(claims["sub"], event_id, match_id, db)
 
 # ---- the admin queue ---------------------------------------------------------
 

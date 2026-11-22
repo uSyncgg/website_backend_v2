@@ -7,6 +7,7 @@ from app.core.db import AsyncSessionLocal
 from app.models.teams import TeamInvites
 from app.services import event_issues
 from app.services import event_money
+from app.services import match_chats
 from app.services import matches
 from app.services import payouts
 from app.services.notifications import delete_old_read
@@ -26,6 +27,8 @@ logger = logging.getLogger(__name__)
 # - events with money whose standings have stood for 24 hours with nothing open in their admin
 #   queue are paid out (app.services.payouts; also SKIP LOCKED). A payout that can't be made is
 #   held, uSync is emailed after the commit, and it's tried again 24 hours later.
+# - match chats are warned 2 minutes before they close and closed once their dispute window and
+#   grace period are over (app.services.match_chats).
 #
 # Each run takes a transaction-level advisory lock first, so with several workers (or several
 # servers) only one does the work each minute; the others skip that tick.
@@ -44,6 +47,7 @@ async def sweep_once() -> None:
         cancelled = await event_money.auto_cancel_due(db)
         paid, held = await payouts.pay_out_due(db)
         await event_issues.housekeep(db)
+        chats_closed = await match_chats.sweep(db)
         removed = await delete_old_read(db)
         cutoff = datetime.now(timezone.utc) - timedelta(days = INVITE_RETENTION_DAYS)
         invites = (await db.execute(
@@ -51,6 +55,8 @@ async def sweep_once() -> None:
         )).rowcount or 0
         await db.commit()
         await payouts.alert_held(held)
+        if chats_closed:
+            logger.info("Bracket sweep: %s match chats closed.", chats_closed)
         if raised or stalled or removed or invites or cancelled or paid:
             logger.info("Bracket sweep: %s one-sided reports and %s stalled matches queued, %s notifications and %s invites deleted, "
                         "%s events cancelled below their minimum, %s paid out.", raised, stalled, removed, invites, cancelled, paid)

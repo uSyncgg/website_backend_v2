@@ -13,6 +13,7 @@ from app.schemas.brackets import MatchScore, Ruling
 from app.services import bracket_access as access
 from app.services import bracket_sync as bsync
 from app.services import event_issues as issues
+from app.services import match_chats
 from app.services.notifications import notify
 
 # Playing the bracket: reports, no-shows, disputes and the host's / admins' rulings.
@@ -94,11 +95,12 @@ async def _open_dispute(db: AsyncSession, match: BracketMatches) -> bool:
 
 async def notify_ready(db: AsyncSession, event: BracketEvents, ready: list[BracketMatches]) -> None:
     """
-    Tells both sides of every match that just became playable.
+    Tells both sides of every match that just became playable, and opens its match chat.
     """
 
     if not ready:
         return
+    await match_chats.open_for_ready(db, event, ready)
     ids = {x for m in ready for x in (m.entry_a_id, m.entry_b_id) if x}
     entries = {e.id: e for e in (await db.execute(select(BracketEntries).where(BracketEntries.id.in_(ids)))).scalars().all()}
     accounts = await access.entry_accounts(list(entries.values()), db)

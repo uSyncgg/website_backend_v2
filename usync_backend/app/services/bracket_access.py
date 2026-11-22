@@ -191,12 +191,13 @@ async def staff_accounts(event: BracketEvents, db: AsyncSession) -> set:
     return {str(a) for a in (host, *admins) if a}
 
 async def viewer_entry(user_id: str | None, entries: list[BracketEntries], db: AsyncSession, team_roles: dict | None = None,
-                       solo: bool = False):
+                       solo: bool = False, players_act: bool = False):
     """
     The signed in account's entrant in an event and whether it can act for it, as (entry, can_act),
     or None. It's theirs if they play for it, or own / captain / play on its team. In a solo event
     a team can have several entries, so the one they play for wins, and the player can act for
-    their own entry as well as the team's owner and captains.
+    their own entry as well as the team's owner and captains. With players_act (match actions:
+    reporting, no-shows, disputes) every picked player can act for their entry too.
     """
 
     if not user_id or not entries:
@@ -219,23 +220,23 @@ async def viewer_entry(user_id: str | None, entries: list[BracketEntries], db: A
         else:
             role = roles.get(x.team_id)
             is_mine = role is not None or x.id in playing
-            can_act = role in ("owner", "captain") or (solo and x.id in playing)
+            can_act = role in ("owner", "captain") or ((solo or players_act) and x.id in playing)
         if is_mine and (found is None or rank(x, can_act) > rank(*found)):
             found = (x, can_act)
     return found
 
 async def acting_entry(user_id: str, event: BracketEvents, db: AsyncSession, among=None) -> BracketEntries:
     """
-    The entrant the signed in account may act for in this event, or a 403. `among` narrows it to
-    some entries (a match's two sides, or the entrant the request names): a captain can have
-    several entries in a solo event.
+    The entrant the signed in account may act for in a match, or a 403: any picked player of the
+    entry, or its team's owner or a captain. `among` narrows it to some entries (a match's two
+    sides, or the entrant the request names): a captain can have several entries in a solo event.
     """
 
     entries = await entries_of(event.id, db)
     if among is not None:
         among = {str(a) for a in among if a}
         entries = [e for e in entries if str(e.id) in among]
-    found = await viewer_entry(user_id, entries, db, solo = event.team_size == 1)
+    found = await viewer_entry(user_id, entries, db, solo = event.team_size == 1, players_act = True)
     if not found or not found[1]:
         raise HTTPException(status_code=403, detail="Only a player in this match (or the team's owner or captain) can do that.")
     return found[0]
