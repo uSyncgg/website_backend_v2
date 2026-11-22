@@ -49,7 +49,7 @@ async def system_account(type_: str, db: AsyncSession) -> LedgerAccounts:
 
 async def post(db: AsyncSession, kind: str, lines: list[tuple[uuid.UUID, int]], *, deposit_id = None,
                created_by = None, reason: str | None = None, reference: str | None = None,
-               idempotency_key: str | None = None) -> LedgerTransactions:
+               idempotency_key: str | None = None, entry_payment_id = None, event_id = None) -> LedgerTransactions:
     """
     Writes one ledger transaction: lines are (ledger account id, signed cents), positive = in.
     Zero amounts are dropped. The caller commits; Postgres checks the sum then.
@@ -60,7 +60,8 @@ async def post(db: AsyncSession, kind: str, lines: list[tuple[uuid.UUID, int]], 
         # Postgres would refuse it at COMMIT anyway; failing here gives a clearer stack trace.
         raise ValueError(f"Ledger transaction {kind} doesn't balance: {lines}")
     txn = LedgerTransactions(id = uuid.uuid4(), kind = kind, deposit_id = deposit_id, created_by_account_id = created_by,
-                             reason = reason, reference = reference, idempotency_key = idempotency_key)
+                             reason = reason, reference = reference, idempotency_key = idempotency_key,
+                             entry_payment_id = entry_payment_id, event_id = event_id)
     db.add(txn)
     await db.flush()
     db.add_all([LedgerLines(transaction_id = txn.id, ledger_account_id = account_id, amount_cents = cents) for account_id, cents in lines])
