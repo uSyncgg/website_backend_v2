@@ -8,7 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.users import Profiles
 from app.models.teams import Teams, TeamMembers, TeamGames
-from app.models.games import Games, GameTitles, GameModes
+from app.models.games import Games, GameTitles, GameModes, Rulesets
 from app.models.wallet import LedgerAccounts
 from app.models.brackets import (
     BracketEvents, BracketEntries, BracketEntryPlayers, BracketEventAdmins, Brackets, BracketSeeds,
@@ -243,6 +243,7 @@ async def _event_out(event: BracketEvents, user_id: str | None, db: AsyncSession
     fmt = await lookups.bracket_format(event.format, db)
     title = await db.get(GameTitles, event.game_title_id) if event.game_title_id else None
     mode = await db.get(GameModes, event.game_mode_id) if event.game_mode_id else None
+    ruleset = await db.get(Rulesets, event.ruleset_id) if event.ruleset_id else None
     host = registrants.get(event.host_profile_id)
     return {
         "id": event.public_id,
@@ -270,6 +271,7 @@ async def _event_out(event: BracketEvents, user_id: str | None, db: AsyncSession
         "prize": event.prize,
         "description": event.description,
         "rules": event.rules,
+        "ruleset": {"key": ruleset.key, "name": ruleset.name, "url": ruleset.url} if ruleset else None,
         "registrationOpen": event.registration_open,
         "noShowMinutes": event.no_show_minutes,
         "payments": _payments_out(event.payments, can_manage),
@@ -569,6 +571,7 @@ async def create_event(user_id: str, body: EventCreate, db: AsyncSession, openai
         raise HTTPException(status_code=422, detail="Both sides need the same team size.")
     fmt = await lookups.bracket_format(body.format, db)
     game, title, mode = await lookups.resolve_game(body.game, body.game_title, body.game_mode, db)
+    ruleset = await lookups.resolve_ruleset(game, title, body.ruleset, db)
     _check_limits(body.min_entrants, body.max_entrants, body.final_best_of, fmt.min_entrants)
     location_type = "in_person" if body.event_type == "lan" else "online"
     if location_type == "in_person" and not body.venue.strip():
@@ -578,12 +581,12 @@ async def create_event(user_id: str, body: EventCreate, db: AsyncSession, openai
     event = BracketEvents(
         id = uuid.uuid4(), public_id = _new_public_id(), host_profile_id = host.id, name = body.name.strip(),
         event_type = body.event_type, game_id = game.id, game_title_id = title.id if title else None,
-        game_mode_id = mode.id if mode else None, format = fmt.key, team_size = int(size_a), best_of = body.best_of,
+        game_mode_id = mode.id if mode else None, ruleset_id = ruleset.id if ruleset else None, format = fmt.key, team_size = int(size_a), best_of = body.best_of,
         final_best_of = body.final_best_of if fmt.has_final else None, max_entrants = body.max_entrants,
         min_entrants = body.min_entrants, platform = body.platform, restrictions = body.restrictions,
         starts_at = body.starts_at, location_type = location_type,
         venue = body.venue.strip() if location_type == "in_person" else "", entry_fee = body.entry_fee,
-        prize = body.prize.strip(), description = body.description, rules = body.rules,
+        prize = body.prize.strip(), description = body.description,
         registration_open = body.registration_open, no_show_minutes = body.no_show_minutes, payments = body.payments,
         signup_form = body.signup_form.model_dump(by_alias = True), delays = [],
         platform_fee_bps = money.platform_fee_bps(), **settings,
@@ -599,6 +602,7 @@ async def create_event(user_id: str, body: EventCreate, db: AsyncSession, openai
 
 async def update_event(user_id: str, public_id: str, body: EventUpdate, db: AsyncSession, openai: AsyncOpenAI | None = None) -> dict:
     values = body.model_dump(exclude_unset = True)
+    values.pop("rules", None)
     if values.get("name"):
         # Before taking the row lock: the moderation call is slow.
         await moderate_name(values["name"], openai, "event name")
@@ -606,7 +610,7 @@ async def update_event(user_id: str, public_id: str, body: EventUpdate, db: Asyn
     bracket = await _bracket(event.id, db)
     entries = await access.entries_of(event.id, db, lock = True)
     if bracket and bracket.status != "draft":
-        for frozen in ("max_entrants", "min_entrants", "best_of", "final_best_of"):
+        for frozen in ("max_entrants", "min_entrants", "best_of", "final_best_of", "ruleset"):
             values.pop(frozen, None)
         if values.get("registration_open"):
             raise HTTPException(status_code=409, detail="The bracket is live, so sign-ups can't reopen.")
@@ -619,12 +623,17 @@ async def update_event(user_id: str, public_id: str, body: EventUpdate, db: Asyn
     signed_up = sum(1 for e in entries if e.status == "signed_up")
     if "max_entrants" in values and values["max_entrants"] is not None and values["max_entrants"] < signed_up:
         raise HTTPException(status_code=409, detail=f"{signed_up} are already signed up, so the maximum can't go below {signed_up}.")
+    if "ruleset" in values:
+        game = await db.get(Games, event.game_id)
+        title = await db.get(GameTitles, event.game_title_id) if event.game_title_id else None
+        ruleset = await lookups.resolve_ruleset(game, title, values.pop("ruleset"), db)
+        values["ruleset_id"] = ruleset.id if ruleset else None
     money_values = {k: values.pop(k) for k in money.MONEY_FIELDS if k in values}
     if money_values:
         await money.check_settings_editable(event, db)
         values.update(money.money_settings(money_values, event, event.payments))
     for key, value in values.items():
-        setattr(event, key, value.strip() if isinstance(value, str) and key not in ("description", "rules") else value)
+        setattr(event, key, value.strip() if isinstance(value, str) and key != "description" else value)
     await db.flush()
     if event.registration_open:
         await money.fund_guarantee(event, db)

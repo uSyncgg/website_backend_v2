@@ -14,6 +14,14 @@ _Avoid_: Bracket event, posted event, user event
 A league, LAN or tournament run somewhere else that uSync lists and links out to, either scraped or submitted and approved by uSync staff.
 _Avoid_: External event, directory event, verified event
 
+**Game Mode**:
+How matches in a hosted event are played, such as Hardpoint or Search and Destroy. An event has exactly one, and every map of every match uses it.
+_Avoid_: Gamemode, playlist, match type
+
+**Ruleset**:
+An official set of competition rules, published by an outside organisation such as the CDL, that a host picks for a hosted event. It applies to the event exactly as published: hosts can't add to it or change it.
+_Avoid_: Rules, custom rules, house rules
+
 ### Wallet
 
 **Wallet**:

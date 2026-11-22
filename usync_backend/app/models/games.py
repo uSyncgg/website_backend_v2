@@ -12,6 +12,8 @@ from sqlalchemy import ForeignKey, SmallInteger, UniqueConstraint
 #                     one, and every event picks one
 #   game_title_modes  which modes each title offers (many to many: titles share modes); only
 #                     used for games that have titles
+#   rulesets          official rulesets (GLOSSARY.md) a host picks from: general to a game, or
+#                     for one of its titles. Once a game has any, every event picks one
 
 class Games(Base):
     """
@@ -68,3 +70,24 @@ class GameTitleModes(Base):
 
     title_id: Mapped[int] = mapped_column(ForeignKey("game_titles.id", ondelete = "CASCADE"), primary_key = True)
     mode_id: Mapped[int] = mapped_column(ForeignKey("game_modes.id", ondelete = "CASCADE"), primary_key = True, index = True)
+
+class Rulesets(Base):
+    """
+    SQL Alchemy model describing the rulesets table: the official rulesets hosts pick from. A
+    ruleset with no title is general, offered on every title of its game; one with a title is
+    offered only for that title. uSync only links to the rules (url), it doesn't copy them.
+    """
+
+    __tablename__ = "rulesets"
+
+    id: Mapped[int] = mapped_column(primary_key = True)
+    game_id: Mapped[int] = mapped_column(SmallInteger, ForeignKey("games.id", ondelete = "RESTRICT"), index = True)
+    game_title_id: Mapped[int | None] = mapped_column(ForeignKey("game_titles.id", ondelete = "RESTRICT"), nullable = True)
+    key: Mapped[str] = mapped_column()
+    name: Mapped[str] = mapped_column()
+    url: Mapped[str] = mapped_column()
+    sort_order: Mapped[int] = mapped_column(SmallInteger, default = 0, server_default = "0")
+
+    __table_args__ = (
+        UniqueConstraint("game_id", "key", name = "uq_rulesets_game_key"),
+    )
