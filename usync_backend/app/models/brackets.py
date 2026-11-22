@@ -4,7 +4,7 @@ from datetime import datetime
 from app.models.base import Base
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy import CheckConstraint, ForeignKey, DateTime, Index, SmallInteger, UniqueConstraint, text
+from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, DateTime, Index, SmallInteger, UniqueConstraint, text
 
 class BracketFormats(Base):
     """
@@ -78,10 +78,15 @@ class BracketEvents(Base):
     prize_funding: Mapped[str | None] = mapped_column(nullable = True)
     guarantee_cents: Mapped[int | None] = mapped_column(nullable = True)
     host_cut_bps: Mapped[int | None] = mapped_column(SmallInteger, nullable = True)
-    payout_structure: Mapped[list | None] = mapped_column(JSONB, nullable = True)
+    # none_as_null: Python None is SQL NULL here, not the JSON value null (a free event has none).
+    payout_structure: Mapped[list | None] = mapped_column(JSONB(none_as_null = True), nullable = True)
     platform_fee_bps: Mapped[int] = mapped_column(SmallInteger, default = 500, server_default = text("500"))
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone = True), nullable = True)
     cancel_reason: Mapped[str | None] = mapped_column(nullable = True)
+    # Payout: due 24 hours after the standings last changed; paid_out_at once it's done (only
+    # events with money pay out). A paid-out event is read-only, like a cancelled one.
+    payout_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone = True), nullable = True)
+    paid_out_at: Mapped[datetime | None] = mapped_column(DateTime(timezone = True), nullable = True)
 
     __table_args__ = (
         UniqueConstraint("public_id", name = "uq_bracket_events_public_id"),
@@ -104,6 +109,8 @@ class BracketEvents(Base):
             "(cancelled_at IS NULL) = (cancel_reason IS NULL) AND (cancel_reason IS NULL OR cancel_reason IN ('host', 'min_entrants', 'admin'))",
             name = "ck_bracket_events_cancelled",
         ),
+        CheckConstraint("paid_out_at IS NULL OR prize_funding IS NOT NULL", name = "ck_bracket_events_paid_out"),
+        Index("ix_bracket_events_payout_due", "payout_due_at", postgresql_where = text("payout_due_at IS NOT NULL AND paid_out_at IS NULL")),
     )
 
 class BracketEntries(Base):
@@ -144,6 +151,29 @@ class BracketEntries(Base):
     __table_args__ = (
         CheckConstraint("status IN ('signed_up', 'needs_players')", name = "ck_bracket_entries_status"),
         CheckConstraint("pay_mode IS NULL OR pay_mode IN ('team', 'each')", name = "ck_bracket_entries_pay_mode"),
+    )
+
+class EventStandings(Base):
+    """
+    SQL Alchemy model describing the event_standings table: every entrant's final placement once
+    the bracket is complete (entrants can share one). Rewritten whenever a correction changes the
+    standings, removed if the bracket reopens. prize_cents is what the entry won, filled in when
+    the event pays out (null before that, and for free events).
+    """
+
+    __tablename__ = "event_standings"
+
+    event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_events.id", ondelete = "CASCADE", deferrable = True, initially = "DEFERRED"), primary_key = True)
+    entry_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_entries.id", ondelete = "CASCADE", deferrable = True, initially = "DEFERRED"), primary_key = True)
+    placement: Mapped[int] = mapped_column(SmallInteger)
+    prize_cents: Mapped[int | None] = mapped_column(BigInteger, nullable = True)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = text("now()"))
+
+    __table_args__ = (
+        CheckConstraint("placement >= 1", name = "ck_event_standings_placement"),
+        CheckConstraint("prize_cents IS NULL OR prize_cents >= 0", name = "ck_event_standings_prize"),
+        Index("ix_event_standings_event_placement", "event_id", "placement"),
+        Index("ix_event_standings_entry", "entry_id"),
     )
 
 class BracketEntryPlayers(Base):
