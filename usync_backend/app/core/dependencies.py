@@ -178,3 +178,23 @@ async def require_admin(
     await db.commit()
 
     return claims
+
+async def require_money_admin(
+    claims: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db)
+) -> dict:
+    """
+    Admins with can_manage_money only: manual wallet credits and debits, and deposit refunds.
+    require_admin runs first (and logs the request); being an admin alone isn't enough.
+
+    ::param claims the verified token claims of an admin
+    ::param db a read/write session
+
+    ::return the token claims
+    """
+
+    allowed = await db.scalar(select(Admins.can_manage_money).where(Admins.user_id == uuid.UUID(claims["sub"])))
+    if not allowed:
+        logger.warning("Denied money admin access: user=%s", claims["sub"])
+        raise HTTPException(status_code = status.HTTP_403_FORBIDDEN, detail = "Only admins allowed to manage money can do this.")
+    return claims

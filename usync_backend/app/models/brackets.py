@@ -4,7 +4,7 @@ from datetime import datetime
 from app.models.base import Base
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy import CheckConstraint, ForeignKey, DateTime, Index, SmallInteger, UniqueConstraint, text
+from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, DateTime, Index, SmallInteger, UniqueConstraint, text
 
 class BracketFormats(Base):
     """
@@ -30,6 +30,14 @@ class BracketEvents(Base):
     SQL Alchemy model describing the bracket_events table: an event a host or venue profile runs
     on uSync (a league, LAN or tournament) with its sign-ups and bracket.
 
+    Money (see GLOSSARY.md): entry_fee_cents is what one player pays (null = free); prize_funding
+    is 'guaranteed' (the host pays guarantee_cents when sign-ups open) or 'entry_funded' (the prize
+    pool is the event pool after the platform fee and host_cut_bps); payout_structure splits the
+    prize pool by placement in basis points. Postgres checks the combination
+    (ck_bracket_events_money) and the payout structure (payout_structure_valid). An event that
+    ever held money is cancelled (cancelled_at), never deleted; host_profile_id is nulled if its
+    host profile is deleted afterwards.
+
     The game is a lookup (games / game_titles / game_modes). Its bracket, seeds and matches are
     their own tables (brackets, bracket_seeds, bracket_matches).
     """
@@ -38,13 +46,15 @@ class BracketEvents(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key = True, default = uuid.uuid4)
     public_id: Mapped[str] = mapped_column()
-    host_profile_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("profiles.id", ondelete = "CASCADE"), index = True)
+    host_profile_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("profiles.id", ondelete = "SET NULL"), nullable = True, index = True)
     name: Mapped[str] = mapped_column()
     event_type: Mapped[str] = mapped_column()
     # A title only exists for some games. The mode becomes required once modes are seeded.
     game_id: Mapped[int] = mapped_column(SmallInteger, ForeignKey("games.id", ondelete = "RESTRICT"), index = True)
     game_title_id: Mapped[int | None] = mapped_column(ForeignKey("game_titles.id", ondelete = "RESTRICT"), nullable = True)
     game_mode_id: Mapped[int | None] = mapped_column(ForeignKey("game_modes.id", ondelete = "RESTRICT"), nullable = True)
+    # Required (by the API) once the game has rulesets; null for games without any.
+    ruleset_id: Mapped[int | None] = mapped_column(ForeignKey("rulesets.id", ondelete = "RESTRICT"), nullable = True)
     format: Mapped[str] = mapped_column(ForeignKey("bracket_formats.key", ondelete = "RESTRICT"))
     team_size: Mapped[int] = mapped_column()
     best_of: Mapped[int] = mapped_column()
@@ -59,6 +69,7 @@ class BracketEvents(Base):
     entry_fee: Mapped[str] = mapped_column(default = "Free", server_default = text("'Free'"))
     prize: Mapped[str] = mapped_column(default = "", server_default = text("''"))
     description: Mapped[str] = mapped_column(default = "", server_default = text("''"))
+    # Free-text rules from before rulesets. No longer written or shown; kept until a cleanup drops it.
     rules: Mapped[str] = mapped_column(default = "", server_default = text("''"))
     registration_open: Mapped[bool] = mapped_column(default = True, server_default = text("true"))
     no_show_minutes: Mapped[int | None] = mapped_column(nullable = True)
@@ -66,25 +77,62 @@ class BracketEvents(Base):
     signup_form: Mapped[dict] = mapped_column(JSONB, default = dict, server_default = text("'{}'::jsonb"))
     delays: Mapped[list] = mapped_column(JSONB, default = list, server_default = text("'[]'::jsonb"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = text("now()"))
+    entry_fee_cents: Mapped[int | None] = mapped_column(nullable = True)
+    prize_funding: Mapped[str | None] = mapped_column(nullable = True)
+    guarantee_cents: Mapped[int | None] = mapped_column(nullable = True)
+    host_cut_bps: Mapped[int | None] = mapped_column(SmallInteger, nullable = True)
+    # none_as_null: Python None is SQL NULL here, not the JSON value null (a free event has none).
+    payout_structure: Mapped[list | None] = mapped_column(JSONB(none_as_null = True), nullable = True)
+    platform_fee_bps: Mapped[int] = mapped_column(SmallInteger, default = 500, server_default = text("500"))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone = True), nullable = True)
+    cancel_reason: Mapped[str | None] = mapped_column(nullable = True)
+    # Payout: due 24 hours after the standings last changed; paid_out_at once it's done (only
+    # events with money pay out). A paid-out event is read-only, like a cancelled one.
+    payout_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone = True), nullable = True)
+    paid_out_at: Mapped[datetime | None] = mapped_column(DateTime(timezone = True), nullable = True)
 
     __table_args__ = (
         UniqueConstraint("public_id", name = "uq_bracket_events_public_id"),
         CheckConstraint("event_type IN ('league', 'lan', 'tournament')", name = "ck_bracket_events_type"),
         CheckConstraint("platform IN ('pc_allowed', 'console_only')", name = "ck_bracket_events_platform"),
         CheckConstraint("team_size BETWEEN 1 AND 10", name = "ck_bracket_events_team_size"),
+        CheckConstraint("entry_fee_cents IS NULL OR entry_fee_cents BETWEEN 100 AND 50000", name = "ck_bracket_events_entry_fee"),
+        CheckConstraint("guarantee_cents IS NULL OR (guarantee_cents > 0 AND guarantee_cents % 100 = 0)", name = "ck_bracket_events_guarantee"),
+        CheckConstraint("host_cut_bps IS NULL OR host_cut_bps BETWEEN 0 AND 5000", name = "ck_bracket_events_host_cut"),
+        CheckConstraint("platform_fee_bps BETWEEN 0 AND 10000", name = "ck_bracket_events_platform_fee"),
+        CheckConstraint("payout_structure_valid(payout_structure)", name = "ck_bracket_events_payout_structure"),
+        CheckConstraint(
+            "(prize_funding IS NULL AND entry_fee_cents IS NULL AND guarantee_cents IS NULL AND host_cut_bps IS NULL AND payout_structure IS NULL)"
+            " OR (prize_funding = 'entry_funded' AND entry_fee_cents IS NOT NULL AND guarantee_cents IS NULL AND host_cut_bps IS NOT NULL AND payout_structure IS NOT NULL)"
+            " OR (prize_funding = 'guaranteed' AND guarantee_cents IS NOT NULL AND host_cut_bps IS NULL AND payout_structure IS NOT NULL)",
+            name = "ck_bracket_events_money",
+        ),
+        CheckConstraint("entry_fee_cents IS NULL OR payments->'enabled' IS DISTINCT FROM 'true'::jsonb", name = "ck_bracket_events_no_passes_with_fee"),
+        CheckConstraint(
+            "(cancelled_at IS NULL) = (cancel_reason IS NULL) AND (cancel_reason IS NULL OR cancel_reason IN ('host', 'min_entrants', 'admin'))",
+            name = "ck_bracket_events_cancelled",
+        ),
+        CheckConstraint("paid_out_at IS NULL OR prize_funding IS NOT NULL", name = "ck_bracket_events_paid_out"),
+        Index("ix_bracket_events_payout_due", "payout_due_at", postgresql_where = text("payout_due_at IS NOT NULL AND paid_out_at IS NULL")),
     )
 
 class BracketEntries(Base):
     """
-    SQL Alchemy model describing the bracket_entries table: one entrant in an event, either a
-    player on their own (1v1) or a team.
+    SQL Alchemy model describing the bracket_entries table: one entrant in an event. Every entry is
+    entered by a team's owner or captain, who picks the event's team size in players
+    (bracket_entry_players). In a solo event (team size 1) a team can enter several of its players,
+    one entry each, named after the player; in a team event a team enters once, named after it.
+    "One entry per team" is checked by the API under the event's row lock, because a unique index
+    can't see the event's team size. "One entry per player per event" is a unique index on
+    bracket_entry_players.
 
-    status is 'signed_up' or 'pending'. A team is pending until its captain has picked the
-    event's team size in players (bracket_entry_players), or while the event is full; pending
-    entries don't take a spot and aren't seeded.
+    status is 'signed_up', or 'needs_players' once a picked player leaves the team before the
+    bracket is published. Both hold a spot (every entry counts towards max_entrants; there's no
+    waitlist). Entries still short when the bracket is published are dropped.
 
-    profile_id is the solo player, or for a team the profile that registered it. It's nulled (not
-    cascaded) when that profile is deleted, so the entry - and any bracket it's in - survives.
+    team_id is never null for new entries. It's nulled (not cascaded) when the team is deleted
+    after the event started, so the entry - and any bracket it's in - survives. profile_id is the
+    profile that entered it, nulled the same way.
     """
 
     __tablename__ = "bracket_entries"
@@ -99,11 +147,36 @@ class BracketEntries(Base):
     answers: Mapped[dict] = mapped_column(JSONB, default = dict, server_default = text("'{}'::jsonb"))
     pass_name: Mapped[str | None] = mapped_column(nullable = True)
     registered_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = text("now()"))
+    # How its entry fees are paid: 'team' (the captain, one payment) or 'each' (every picked
+    # player, one payment each). Null in free events.
+    pay_mode: Mapped[str | None] = mapped_column(nullable = True)
 
     __table_args__ = (
-        CheckConstraint("status IN ('signed_up', 'pending')", name = "ck_bracket_entries_status"),
-        Index("uq_bracket_entries_team", "event_id", "team_id", unique = True, postgresql_where = text("team_id IS NOT NULL")),
-        Index("uq_bracket_entries_solo", "event_id", "profile_id", unique = True, postgresql_where = text("team_id IS NULL")),
+        CheckConstraint("status IN ('signed_up', 'needs_players')", name = "ck_bracket_entries_status"),
+        CheckConstraint("pay_mode IS NULL OR pay_mode IN ('team', 'each')", name = "ck_bracket_entries_pay_mode"),
+    )
+
+class EventStandings(Base):
+    """
+    SQL Alchemy model describing the event_standings table: every entrant's final placement once
+    the bracket is complete (entrants can share one). Rewritten whenever a correction changes the
+    standings, removed if the bracket reopens. prize_cents is what the entry won, filled in when
+    the event pays out (null before that, and for free events).
+    """
+
+    __tablename__ = "event_standings"
+
+    event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_events.id", ondelete = "CASCADE", deferrable = True, initially = "DEFERRED"), primary_key = True)
+    entry_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bracket_entries.id", ondelete = "CASCADE", deferrable = True, initially = "DEFERRED"), primary_key = True)
+    placement: Mapped[int] = mapped_column(SmallInteger)
+    prize_cents: Mapped[int | None] = mapped_column(BigInteger, nullable = True)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = text("now()"))
+
+    __table_args__ = (
+        CheckConstraint("placement >= 1", name = "ck_event_standings_placement"),
+        CheckConstraint("prize_cents IS NULL OR prize_cents >= 0", name = "ck_event_standings_prize"),
+        Index("ix_event_standings_event_placement", "event_id", "placement"),
+        Index("ix_event_standings_entry", "entry_id"),
     )
 
 class BracketEntryPlayers(Base):
@@ -293,7 +366,7 @@ class EventIssues(Base):
     """
     SQL Alchemy model describing the event_issues table: the per-event admin queue. Anything that
     needs the host or an admin to step in - a disputed score, a one-sided report left 5 minutes,
-    a no-show, a post-advancement dispute - is a row here, and the host and admins are notified.
+    a no-show, a post-advancement dispute, a stalled match nobody has reported - is a row here, and the host and admins are notified.
     Only they can see an event's queue. Oldest first.
 
     status: 'open' (in the queue) -> 'claimed' (someone pressed "go to issue"; shown as claimed
@@ -322,7 +395,7 @@ class EventIssues(Base):
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone = True), nullable = True)
 
     __table_args__ = (
-        CheckConstraint("type IN ('dispute', 'one_sided_report', 'no_show', 'post_advancement_dispute')", name = "ck_event_issues_type"),
+        CheckConstraint("type IN ('dispute', 'one_sided_report', 'no_show', 'post_advancement_dispute', 'stalled_match', 'admin_requested')", name = "ck_event_issues_type"),
         CheckConstraint("status IN ('open', 'claimed', 'dismissed', 'resolved')", name = "ck_event_issues_status"),
         Index("ix_event_issues_queue", "event_id", "status", "created_at"),
         Index("uq_event_issues_one_dispute_per_side", "match_id", "raised_by_entry_id", unique = True,

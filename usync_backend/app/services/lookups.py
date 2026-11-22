@@ -1,25 +1,27 @@
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.models.games import Games, GameTitles, GameModes, GameTitleModes
+from app.models.games import Games, GameTitles, GameModes, GameTitleModes, Rulesets
 from app.models.brackets import BracketFormats
 
-# The lookup tables (games, titles, modes, formats) as the event form and team form need them,
+# The lookup tables (games, titles, modes, rulesets, formats) as the event form and team form need them,
 # plus resolving the keys a request sends into rows. These tables only change with a migration.
 
 async def bracket_meta(db: AsyncSession) -> dict:
     """
-    Everything the event form offers: games with their titles and modes (each title lists the
-    modes it has), and the enabled formats.
+    Everything the event form offers: games with their titles, modes and rulesets (each title
+    lists the modes it has; a ruleset's title is null when it's general), and the enabled formats.
     """
 
     games = (await db.execute(select(Games).order_by(Games.sort_order, Games.name))).scalars().all()
     titles = (await db.execute(select(GameTitles).order_by(GameTitles.release_year.desc().nulls_last(), GameTitles.name))).scalars().all()
     modes = (await db.execute(select(GameModes).order_by(GameModes.name))).scalars().all()
     title_modes = (await db.execute(select(GameTitleModes))).scalars().all()
+    rulesets = (await db.execute(select(Rulesets).order_by(Rulesets.sort_order, Rulesets.name))).scalars().all()
     formats = (await db.execute(select(BracketFormats).where(BracketFormats.enabled.is_(True)).order_by(BracketFormats.sort_order))).scalars().all()
 
     mode_keys = {m.id: m.key for m in modes}
+    title_keys = {t.id: t.key for t in titles}
     by_title: dict = {}
     for tm in title_modes:
         by_title.setdefault(tm.title_id, []).append(mode_keys[tm.mode_id])
@@ -34,6 +36,10 @@ async def bracket_meta(db: AsyncSession) -> dict:
                     for t in titles if t.game_id == g.id
                 ],
                 "modes": [{"key": m.key, "name": m.name} for m in modes if m.game_id == g.id],
+                "rulesets": [
+                    {"key": r.key, "name": r.name, "url": r.url, "title": title_keys.get(r.game_title_id)}
+                    for r in rulesets if r.game_id == g.id
+                ],
             }
             for g in games
         ],
@@ -92,3 +98,22 @@ async def bracket_format(key: str, db: AsyncSession) -> BracketFormats:
     if not fmt or not fmt.enabled:
         raise HTTPException(status_code=422, detail="Pick one of the bracket formats offered.")
     return fmt
+
+async def resolve_ruleset(game: Games, title: GameTitles | None, ruleset_key: str | None, db: AsyncSession) -> Rulesets | None:
+    """
+    The ruleset an event picked, checked against its game and title. The rulesets on offer are
+    the game's general ones plus the title's own; once there are any, picking one is required.
+    """
+
+    applies = Rulesets.game_title_id.is_(None)
+    if title:
+        applies = applies | (Rulesets.game_title_id == title.id)
+    offered = (await db.execute(select(Rulesets).where(Rulesets.game_id == game.id).where(applies))).scalars().all()
+    if offered:
+        ruleset = next((r for r in offered if r.key == ruleset_key), None)
+        if not ruleset:
+            raise HTTPException(status_code=422, detail="Pick one of the rulesets offered for this game.")
+        return ruleset
+    if ruleset_key:
+        raise HTTPException(status_code=422, detail=f"{game.name} doesn't have rulesets to pick from yet.")
+    return None

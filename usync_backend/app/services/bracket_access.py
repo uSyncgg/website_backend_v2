@@ -11,19 +11,29 @@ from app.services.naming import account_profile_ids
 #
 # - Managers: the host's account (any of its profiles) and accepted admins. They run the event.
 # - Staff: the host and every invited admin, accepted or not. Staff can't play in the event.
-# - An entrant can be acted for (reporting, unregistering, picking players) by the solo player, or
-#   a team's current owner or captain - from the signed in account's own team role, never from
+# - An entrant can be acted for (reporting, unregistering, picking players) by its team's current
+#   owner or captain, or in a solo event also by the player - from the signed in account's own team role, never from
 #   whoever happened to register the team.
 
 my_profile_ids = account_profile_ids
 
-async def event_by_public_id(public_id: str, db: AsyncSession, lock: bool = False) -> BracketEvents:
+async def event_by_public_id(public_id: str, db: AsyncSession, lock: bool = False, allow_cancelled: bool = False) -> BracketEvents:
+    """
+    The event, row-locked when lock = True. Every change to an event locks it first, so a locked
+    read of a cancelled or paid-out event is refused here (409): both are read-only. Cancelling
+    itself passes allow_cancelled so a repeat is a no-op (a paid-out event is refused even then).
+    """
+
     query = select(BracketEvents).where(BracketEvents.public_id == public_id)
     if lock:
         query = query.with_for_update()
     event = (await db.execute(query)).scalars().first()
     if not event:
         raise HTTPException(status_code=404, detail="Event not found.")
+    if lock and event.cancelled_at is not None and not allow_cancelled:
+        raise HTTPException(status_code=409, detail="This event was cancelled.")
+    if lock and event.paid_out_at is not None:
+        raise HTTPException(status_code=409, detail="This event has paid out its prizes, so it can't be changed.")
     return event
 
 async def admin_event_ids(user_id: str | None, db: AsyncSession) -> set:
@@ -180,10 +190,14 @@ async def staff_accounts(event: BracketEvents, db: AsyncSession) -> set:
     )).scalars().all()
     return {str(a) for a in (host, *admins) if a}
 
-async def viewer_entry(user_id: str | None, entries: list[BracketEntries], db: AsyncSession, team_roles: dict | None = None):
+async def viewer_entry(user_id: str | None, entries: list[BracketEntries], db: AsyncSession, team_roles: dict | None = None,
+                       solo: bool = False, players_act: bool = False):
     """
     The signed in account's entrant in an event and whether it can act for it, as (entry, can_act),
-    or None. It's theirs if they play for it, or own / captain / play on its team.
+    or None. It's theirs if they play for it, or own / captain / play on its team. In a solo event
+    a team can have several entries, so the one they play for wins, and the player can act for
+    their own entry as well as the team's owner and captains. With players_act (match actions:
+    reporting, no-shows, disputes) every picked player can act for their entry too.
     """
 
     if not user_id or not entries:
@@ -196,23 +210,33 @@ async def viewer_entry(user_id: str | None, entries: list[BracketEntries], db: A
         .where(BracketEntryPlayers.profile_id.in_(mine))
     )).scalars().all()) if mine else set()
     found = None
+
+    def rank(entry, can_act):
+        return (entry.id in playing, can_act)
+
     for x in entries:
         if x.team_id is None:
-            is_mine = can_act = x.profile_id in mine
+            is_mine = can_act = x.profile_id in mine or x.id in playing
         else:
             role = roles.get(x.team_id)
             is_mine = role is not None or x.id in playing
-            can_act = role in ("owner", "captain")
-        if is_mine and (found is None or (can_act and not found[1])):
+            can_act = role in ("owner", "captain") or ((solo or players_act) and x.id in playing)
+        if is_mine and (found is None or rank(x, can_act) > rank(*found)):
             found = (x, can_act)
     return found
 
-async def acting_entry(user_id: str, event: BracketEvents, db: AsyncSession) -> BracketEntries:
+async def acting_entry(user_id: str, event: BracketEvents, db: AsyncSession, among=None) -> BracketEntries:
     """
-    The entrant the signed in account may act for in this event, or a 403.
+    The entrant the signed in account may act for in a match, or a 403: any picked player of the
+    entry, or its team's owner or a captain. `among` narrows it to some entries (a match's two
+    sides, or the entrant the request names): a captain can have several entries in a solo event.
     """
 
-    found = await viewer_entry(user_id, await entries_of(event.id, db), db)
+    entries = await entries_of(event.id, db)
+    if among is not None:
+        among = {str(a) for a in among if a}
+        entries = [e for e in entries if str(e.id) in among]
+    found = await viewer_entry(user_id, entries, db, solo = event.team_size == 1, players_act = True)
     if not found or not found[1]:
         raise HTTPException(status_code=403, detail="Only a player in this match (or the team's owner or captain) can do that.")
     return found[0]

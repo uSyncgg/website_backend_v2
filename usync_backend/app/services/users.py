@@ -3,6 +3,8 @@ import logging
 import unicodedata
 import re
 
+from datetime import datetime, timezone
+
 from typing import NoReturn
 from pydantic import ValidationError
 from sqlalchemy import select, insert, update, delete
@@ -33,6 +35,8 @@ from app.schemas.users import (
     OrgUpdate
 )
 from app.models.users import UsersParent, Profiles, ProfileLinks, Players, Hosts, Venues, Organizations
+from app.services.wallet import check_can_delete_account
+from app.services import event_money
 from app.services.pictures import PFP_BUCKET, process_pfp, copy_pfp, remove_pfps, storage_path
 from app.services.naming import (
     new_public_id, normalize_username, canonical_username, split_words, profanity_moderation,
@@ -57,7 +61,8 @@ SPACED_USERNAME_TYPES = {"org"}
 
 DETAIL_UPDATES = {"player": PlayerUpdate, "host": HostUpdate, "venue": VenueUpdate, "org": OrgUpdate}
 # Orgs run teams and enter events but never post them, so they never host brackets.
-NO_BRACKET_HOSTING = {"org"}
+# Only host and venue profiles (commission-based admins) can run brackets. See the Terms of Service.
+NO_BRACKET_HOSTING = {"org", "player"}
 GAME_ACCOUNT_LABELS = {"battlenet": "Battle.net", "activision": "Activision", "steam": "Steam", "riot": "Riot"}
 LINK_LABELS = {
     "twitch": "Twitch", "twitter": "Twitter", "youtube": "YouTube", "kick": "Kick", "discord": "Discord",
@@ -370,7 +375,7 @@ async def handle_registration(
     urls, paths = await _prepare_pictures(payload, files, supabase, user_id, openai)
 
     try:
-        user = UsersParent(id = user_id, email = email)
+        user = UsersParent(id = user_id, email = email, tos_version = payload.tos_version, tos_accepted_at = datetime.now(timezone.utc))
         db.add(user)
         await db.flush()
 
@@ -736,7 +741,7 @@ async def update_profile(user_id: str, profile_type: ProfileType, changes: Profi
             )
 
     if profile_type in NO_BRACKET_HOSTING and payload.get("bracket_hosting"):
-        raise _field_error(("body", "bracket_hosting"), "Organizations can't host brackets. Use a host profile to post events.")
+        raise _field_error(("body", "bracket_hosting"), "Players and organizations can't host brackets. Use a host profile to post events.")
 
     profile = await get_own_profile(user_id, profile_type, db)
     profile_id = profile.id
@@ -878,6 +883,13 @@ async def delete_profile(user_id: str, profile_type: ProfileType, db: AsyncSessi
 
     pfp_path = storage_path(profile.profile_picture) if profile.profile_picture else None
 
+    # Events: not while it hosts an unfinished one or plays in a live one with prize money. Its
+    # free events go with it; events that held money stay, without a host. (Entry fees it paid as
+    # Each Pays Own in upcoming events are refunded to the account's wallet by sync_team.)
+    await event_money.check_hosts_can_go({profile.id}, db)
+    await event_money.check_players_can_go({profile.id}, db)
+    await event_money.delete_free_hosted_events({profile.id}, db)
+
     # Teams it owns pass to another player instead of being deleted with it.
     teams_losing_a_member = await before_profiles_deleted({profile.id}, db)
     await db.execute(delete(Profiles).where(Profiles.id == profile.id).where(Profiles.account_id == user_id))
@@ -897,8 +909,14 @@ async def delete_account(user_id: str, db: AsyncSession, supabase: AsyncClient) 
     Every step is safe to retry: a missing users row just deletes nothing.
     """
 
+    # Money first: a wallet that isn't empty (or is frozen) blocks deletion, and so do unfinished
+    # hosted events, live events with prize money it plays in and entry fees it has paid.
+    await check_can_delete_account(user_id, db)
+    await event_money.check_account_can_go(user_id, db)
+
     # Teams the account owns pass to another player instead of being deleted with it.
     profile_ids = set((await db.execute(select(Profiles.id).where(Profiles.account_id == user_id))).scalars().all())
+    await event_money.delete_free_hosted_events(profile_ids, db)
     teams_losing_a_member = await before_profiles_deleted(profile_ids, db)
     await db.execute(delete(UsersParent).where(UsersParent.id == user_id))
     await after_profiles_deleted(teams_losing_a_member, db)

@@ -1,9 +1,9 @@
 import uuid
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.models.brackets import BracketEvents, Brackets, BracketSeeds, BracketMatches, MatchReports
+from app.models.brackets import BracketEvents, Brackets, BracketSeeds, BracketMatches, MatchReports, EventStandings
 from app.services import bracket_engine as engine
 
 # Keeps an event's bracket_matches rows in step with the bracket engine.
@@ -16,6 +16,13 @@ from app.services import bracket_engine as engine
 #
 # Swiss rounds are paired once: stored rounds are handed back to the engine as fixed, so a later
 # change to an earlier round only moves the standings.
+#
+# Once the bracket is complete, sync() also stores every entrant's final placement
+# (event_standings). A later correction that changes them rewrites them, and reopening the
+# bracket removes them. For an event with money, each change starts the 24-hour payout clock again
+# (payout_due_at); the sweeper pays out once it runs out (app.services.payouts).
+
+PAYOUT_DELAY = timedelta(hours = 24)
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -158,8 +165,46 @@ async def sync(event: BracketEvents, bracket: Brackets, db: AsyncSession, rows: 
             bracket.status, bracket.completed_at = "complete", now
     elif bracket.status == "complete":
         bracket.status, bracket.completed_at = "published", None
+    final = engine.final_standings(bracket.format, seeds, built) if bracket.status == "complete" else None
+    await record_standings(event, final, db)
     await db.flush()
     return newly_ready
+
+async def record_standings(event: BracketEvents, final: list[tuple[str, int]] | None, db: AsyncSession) -> bool:
+    """
+    Stores the final placements (None = not decided: removes them). Does nothing if they haven't
+    changed. When they change on an event with money, the payout is due 24 hours from now (or
+    not at all while undecided). Returns whether anything changed.
+    """
+
+    wanted = {uuid.UUID(eid): placement for eid, placement in (final or [])}
+    stored = dict((await db.execute(
+        select(EventStandings.entry_id, EventStandings.placement).where(EventStandings.event_id == event.id)
+    )).all())
+    if wanted == stored:
+        return False
+    await db.execute(delete(EventStandings).where(EventStandings.event_id == event.id))
+    db.add_all([EventStandings(event_id = event.id, entry_id = entry_id, placement = placement) for entry_id, placement in wanted.items()])
+    if event.prize_funding:
+        event.payout_due_at = _now() + PAYOUT_DELAY if wanted else None
+    await db.flush()
+    return True
+
+async def standings_of_event(event: BracketEvents, bracket: Brackets | None, db: AsyncSession) -> list[tuple[uuid.UUID, int, int | None]]:
+    """
+    [(entry id, placement, prize cents)] best first, from event_standings. Brackets finished
+    before standings were stored have no rows; theirs are worked out from the matches instead.
+    """
+
+    rows = (await db.execute(
+        select(EventStandings.entry_id, EventStandings.placement, EventStandings.prize_cents)
+        .where(EventStandings.event_id == event.id).order_by(EventStandings.placement, EventStandings.entry_id)
+    )).all()
+    if rows or bracket is None or bracket.status != "complete":
+        return [tuple(r) for r in rows]
+    seeds = await seeds_of(bracket, db)
+    final = engine.final_standings(bracket.format, seeds, build(bracket.format, seeds, await match_rows(bracket, db))) or []
+    return [(uuid.UUID(eid), placement, None) for eid, placement in final]
 
 def dependents(row: BracketMatches, rows: list[BracketMatches]) -> list[BracketMatches]:
     """
@@ -190,4 +235,4 @@ def built_with_rows(fmt: str, seeds: list[str], rows: list[BracketMatches]) -> d
         m["locked"] = bool(row and row.locked)
         m["ruled"] = bool(row and row.ruled)
     done, total = engine.progress(built)
-    return {**built, "placements": engine.placements(fmt, built), "progress": {"done": done, "total": total}}
+    return {**built, "placements": engine.placements(fmt, built, seeds), "progress": {"done": done, "total": total}}
