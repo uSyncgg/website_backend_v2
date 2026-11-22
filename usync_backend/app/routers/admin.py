@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 import uuid
 
@@ -8,8 +8,12 @@ from app.core.limiter import limiter, MODERATE
 from app.schemas.admin import AdminAccountsOut, AdminAnalyticsOut, AdminEventsOut
 from app.services.admin import get_admin_accounts, get_admin_analytics, get_admin_events
 from app.services.brackets import admin_reset_bracket
-from app.schemas.wallet import AdminWalletOut, ManualMoveIn, DepositRefundIn, EventCancelIn
+from app.schemas.wallet import (
+    AdminWalletOut, ManualMoveIn, DepositRefundIn, EventCancelIn, AdminWithdrawalOut, AdminWithdrawalsOut,
+    WithdrawalCompleteIn, WithdrawalReturnIn,
+)
 from app.services import wallet as wallet_svc
+from app.services import withdrawals as withdrawals_svc
 
 # Admin dashboard, admins only (the admins table; every allowed request is in admin_audit_log).
 # Reads use a READ ONLY session; the few support actions use a normal one.
@@ -100,3 +104,34 @@ async def adminRefundDeposit(request: Request, response: Response, deposit_id: u
     """
 
     return await wallet_svc.refund_deposit(claims, deposit_id, body.reason, db, stripeClient)
+
+@router.get("/withdrawals", response_model=AdminWithdrawalsOut)
+@limiter.limit(MODERATE)
+async def adminWithdrawals(request: Request, response: Response,
+                           status_: str = Query(default = "pending", alias = "status", pattern = "^(pending|completed|returned)$"),
+                           claims: dict = Depends(require_money_admin), db: AsyncSession = Depends(get_db)):
+    """
+    Withdrawals with this status, oldest first, with each wallet's current Earnings and frozen state.
+    """
+
+    return await withdrawals_svc.list_withdrawals(status_, db)
+
+@router.post("/withdrawals/{withdrawal_id}/complete", response_model=AdminWithdrawalOut)
+@limiter.limit(MODERATE)
+async def adminCompleteWithdrawal(request: Request, response: Response, withdrawal_id: uuid.UUID, body: WithdrawalCompleteIn,
+                                  claims: dict = Depends(require_money_admin), db: AsyncSession = Depends(get_db)):
+    """
+    The money was sent by hand: it leaves the wallet for good. Refused while the wallet is frozen. Audit logged.
+    """
+
+    return await withdrawals_svc.complete_withdrawal(claims, withdrawal_id, body.external_reference, db)
+
+@router.post("/withdrawals/{withdrawal_id}/return", response_model=AdminWithdrawalOut)
+@limiter.limit(MODERATE)
+async def adminReturnWithdrawal(request: Request, response: Response, withdrawal_id: uuid.UUID, body: WithdrawalReturnIn,
+                                claims: dict = Depends(require_money_admin), db: AsyncSession = Depends(get_db)):
+    """
+    Not sent: the money goes back to the user's Earnings, with a reason they see. Audit logged.
+    """
+
+    return await withdrawals_svc.return_withdrawal(claims, withdrawal_id, body.reason, db)

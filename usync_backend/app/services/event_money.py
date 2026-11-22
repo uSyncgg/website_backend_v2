@@ -162,13 +162,14 @@ async def _lock_wallets(account_ids, db: AsyncSession) -> dict[str, Wallets]:
 
 async def _spendable(wallet: Wallets, db: AsyncSession) -> int:
     """
-    What a wallet can pay right now: nothing while frozen, otherwise both buckets.
+    What a wallet can pay right now: nothing while frozen, otherwise both buckets (never a
+    Pending Withdrawal).
     """
 
     if wallet.frozen_at is not None:
         return 0
     accounts = await ledger.wallet_accounts(wallet.id, db)
-    return sum(max(a.balance_cents, 0) for a in accounts.values())
+    return sum(max(accounts[t].balance_cents, 0) for t in ledger.SPENDABLE)
 
 def auto_pay_on(wallet: Wallets) -> bool:
     return wallet.auto_pay_until is not None and wallet.auto_pay_until > _now()

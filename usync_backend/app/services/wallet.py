@@ -6,7 +6,7 @@ import resend
 import stripe
 from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException
-from sqlalchemy import select, func, update
+from sqlalchemy import select, func, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from stripe import StripeClient
 from app.core.db import AsyncSessionLocal
@@ -58,11 +58,15 @@ async def _wallet_out(wallet: Wallets, db: AsyncSession) -> dict:
     return {
         "depositedCents": deposited,
         "earningsCents": earnings,
+        # Spendable money only: a Pending Withdrawal is shown on its own.
         "totalCents": deposited + earnings,
+        "pendingWithdrawalCents": accounts[ledger.PENDING_WITHDRAWAL].balance_cents,
         "frozen": wallet.frozen_at is not None,
         "frozenAt": wallet.frozen_at.isoformat() if wallet.frozen_at else None,
         "autoPayUntil": wallet.auto_pay_until.isoformat() if wallet.auto_pay_until and wallet.auto_pay_until > _now() else None,
     }
+
+BUCKETS = {ledger.DEPOSITED: "deposited", ledger.EARNINGS: "earnings", ledger.PENDING_WITHDRAWAL: "pending_withdrawal"}
 
 async def my_wallet(user_id: str, db: AsyncSession) -> dict:
     return await _wallet_out(await ledger.wallet_of(user_id, db), db)
@@ -70,7 +74,9 @@ async def my_wallet(user_id: str, db: AsyncSession) -> dict:
 async def history(user_id: str, db: AsyncSession, before: int | None = None, limit: int = 30) -> dict:
     """
     The wallet's ledger lines, newest first: one row per bucket a transaction touched. `before`
-    is the last line id of the previous page.
+    is the last line id of the previous page. Pending Withdrawal lines are only shown for a
+    completed withdrawal (the money leaving); the request and the return show as the Earnings
+    line alone, so the user sees each step once.
     """
 
     wallet = await ledger.wallet_of(user_id, db)
@@ -80,6 +86,7 @@ async def history(user_id: str, db: AsyncSession, before: int | None = None, lim
         .join(LedgerAccounts, LedgerAccounts.id == LedgerLines.ledger_account_id)
         .outerjoin(BracketEvents, BracketEvents.id == LedgerTransactions.event_id)
         .where(LedgerAccounts.wallet_id == wallet.id)
+        .where(or_(LedgerAccounts.type != ledger.PENDING_WITHDRAWAL, LedgerTransactions.kind == "withdrawal_complete"))
         .order_by(LedgerLines.id.desc())
         .limit(limit + 1)
     )
@@ -90,7 +97,7 @@ async def history(user_id: str, db: AsyncSession, before: int | None = None, lim
         {
             "id": line.id,
             "kind": txn.kind,
-            "bucket": "deposited" if type_ == ledger.DEPOSITED else "earnings",
+            "bucket": BUCKETS[type_],
             "amountCents": line.amount_cents,
             "createdAt": txn.created_at.isoformat(),
             # Staff write the reason for manual changes; the reference (a wire number) stays internal.
@@ -296,6 +303,8 @@ async def check_can_delete_account(user_id: str, db: AsyncSession) -> None:
     if wallet.frozen_at is not None:
         raise HTTPException(status_code=409, detail="Your wallet is frozen after a disputed deposit. Contact uSync support before deleting your account.")
     accounts = await ledger.wallet_accounts(wallet.id, db)
+    if accounts[ledger.PENDING_WITHDRAWAL].balance_cents != 0:
+        raise HTTPException(status_code=409, detail="You have a pending withdrawal. Wait for it to finish before deleting your account.")
     if any(a.balance_cents != 0 for a in accounts.values()):
         raise HTTPException(status_code=409, detail=(
             "Your wallet still has money in it. Spend or withdraw it (or contact uSync support) before deleting your account."
