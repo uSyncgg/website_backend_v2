@@ -31,8 +31,20 @@ Money uSync staff add to a wallet's deposited funds by hand, such as a wired gua
 _Avoid_: Balance adjustment, top-up
 
 **Withdrawal**:
-Money paid out of a wallet's earnings to the user, outside uSync.
+Money paid out of a wallet's earnings to the user, outside uSync. The user asks for an amount of their earnings, or all of them, and uSync staff send it. A wallet has at most one pending withdrawal at a time.
 _Avoid_: Cash out, payout
+
+**Pending Withdrawal**:
+Earnings a user has asked to withdraw that uSync hasn't sent or returned yet. They can't be spent, moved or cancelled by the user.
+_Avoid_: Withdrawal pool, held funds
+
+**Withdrawal Completed**:
+A withdrawal uSync staff have sent to the user. The money has left the wallet for good.
+_Avoid_: Withdrawal approved, paid
+
+**Withdrawal Returned**:
+A withdrawal uSync staff didn't send, with a reason. The money goes back to the wallet's earnings.
+_Avoid_: Withdrawal failed, rejected, declined
 
 **Ledger Entry**:
 The dated record of one movement of money into or out of a wallet or an event pool. The record of every deposit, entry fee, payout and withdrawal.

@@ -1,5 +1,5 @@
 from typing import Any
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
 
 class CamelModel(BaseModel):
@@ -12,6 +12,8 @@ class WalletOut(Out):
     depositedCents: int
     earningsCents: int
     totalCents: int
+    # Earnings waiting for uSync to send them (0 when nothing is pending); not part of totalCents.
+    pendingWithdrawalCents: int = 0
     frozen: bool
     frozenAt: str | None
     autoPayUntil: str | None = None
@@ -69,3 +71,40 @@ class AdminWalletOut(WalletOut):
     accountId: str
     email: str
     deposits: list[dict[str, Any]]
+
+class WithdrawalIn(CamelModel):
+    # Either an amount in cents (at least $1; checked in the service with the message users see)
+    # or all = true for every cent of Earnings at the moment it's processed.
+    amount_cents: int | None = Field(default = None, gt = 0, le = 100_000_000)
+    all: bool = False
+    # One per withdraw dialog: a double click or retry asks once.
+    idempotency_key: str = Field(min_length = 16, max_length = 100, pattern = r"^[A-Za-z0-9-]+$")
+
+    @model_validator(mode = "after")
+    def _one_of(self):
+        if self.all == (self.amount_cents is not None):
+            raise ValueError("Send either amountCents or all, not both.")
+        return self
+
+class WithdrawalCompleteIn(CamelModel):
+    external_reference: str | None = Field(default = None, max_length = 200)
+
+class WithdrawalReturnIn(CamelModel):
+    reason: str = Field(min_length = 3, max_length = 500)
+
+class AdminWithdrawalOut(Out):
+    id: str
+    accountId: str | None
+    email: str | None
+    usernames: list[str]
+    amountCents: int
+    status: str
+    requestedAt: str
+    decidedAt: str | None
+    returnReason: str | None
+    externalReference: str | None
+    walletFrozen: bool
+    earningsCents: int
+
+class AdminWithdrawalsOut(Out):
+    items: list[AdminWithdrawalOut]

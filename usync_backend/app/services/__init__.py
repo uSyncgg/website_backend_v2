@@ -28,7 +28,9 @@ DEPOSIT_MIN_CENTS = 500
 DEPOSIT_FEE_PERCENT = 5
 DEPOSIT_DAILY_LIMIT_CENTS = 100_000
 DEPOSIT_HOLD_MINUTES = 30
-# Where manual credits/debits and deposit refunds are reported (each one is also in the audit log).
+# Withdrawals: any amount of Earnings from $1, or all of them (the only option below $1).
+WITHDRAWAL_MIN_CENTS = 100
+# Where manual credits/debits, deposit refunds and withdrawal requests are reported (each one is also in the audit log).
 MONEY_ALERT_EMAIL = os.getenv("MONEY_ALERT_EMAIL", "contact@usync.gg")
 REGISTRATION_STATUSES = ["pending", "paid", "payment_failed", "canceled", "expired", "refunded"]
 

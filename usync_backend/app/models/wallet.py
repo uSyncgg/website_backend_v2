@@ -11,14 +11,14 @@ from app.models.base import Base
 # c2e4a6b8d0f1, so they hold whatever code writes here. Write money only through
 # app.services.ledger.post().
 
-WALLET_ACCOUNT_TYPES = ("wallet_deposited", "wallet_earnings")
+WALLET_ACCOUNT_TYPES = ("wallet_deposited", "wallet_earnings", "wallet_pending_withdrawal")
 SYSTEM_ACCOUNT_TYPES = ("platform_revenue", "external")
 EVENT_ACCOUNT_TYPES = ("event_pool", "event_guarantee")
 
 class Wallets(Base):
     """
     SQL Alchemy model describing the wallets table: one per account that has a profile (a trigger
-    on profiles makes it; a trigger here opens its two ledger accounts). account_id is nulled when
+    on profiles makes it; a trigger here opens its three ledger accounts). account_id is nulled when
     the account is deleted, so its history stays. frozen_at is set by a chargeback that leaves it
     below zero; it can't be cleared while it's still below zero.
     """
@@ -37,10 +37,11 @@ class Wallets(Base):
 class LedgerAccounts(Base):
     """
     SQL Alchemy model describing the ledger_accounts table: everything that holds money. A
-    wallet's 'wallet_deposited' and 'wallet_earnings'; an event's 'event_pool' (entry fees) and
+    wallet's 'wallet_deposited', 'wallet_earnings' and 'wallet_pending_withdrawal' (Earnings asked
+    to be withdrawn, untouchable until staff complete or return it); an event's 'event_pool' (entry fees) and
     'event_guarantee' (a guaranteed prize), opened the first time money moves for it; and uSync's
     'platform_revenue' and 'external' (the outside world). balance_cents is kept by the
-    ledger_lines trigger; never set it. Event accounts can never go below zero.
+    ledger_lines trigger; never set it. Event and Pending Withdrawal accounts can never go below zero.
     """
 
     __tablename__ = "ledger_accounts"
@@ -53,9 +54,12 @@ class LedgerAccounts(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = text("now()"))
 
     __table_args__ = (
-        CheckConstraint("type IN ('wallet_deposited', 'wallet_earnings', 'platform_revenue', 'external', 'event_pool', 'event_guarantee')", name = "ck_ledger_accounts_type"),
         CheckConstraint(
-            "(type IN ('wallet_deposited', 'wallet_earnings')) = (wallet_id IS NOT NULL) AND (type IN ('event_pool', 'event_guarantee')) = (event_id IS NOT NULL)",
+            "type IN ('wallet_deposited', 'wallet_earnings', 'platform_revenue', 'external', 'event_pool', 'event_guarantee', 'wallet_pending_withdrawal')",
+            name = "ck_ledger_accounts_type",
+        ),
+        CheckConstraint(
+            "(type IN ('wallet_deposited', 'wallet_earnings', 'wallet_pending_withdrawal')) = (wallet_id IS NOT NULL) AND (type IN ('event_pool', 'event_guarantee')) = (event_id IS NOT NULL)",
             name = "ck_ledger_accounts_owner",
         ),
         Index("uq_ledger_accounts_event_type", "event_id", "type", unique = True, postgresql_where = text("event_id IS NOT NULL")),
@@ -133,6 +137,43 @@ class EntryPayments(Base):
         Index("ix_entry_payments_payer", "payer_wallet_id"),
     )
 
+class Withdrawals(Base):
+    """
+    SQL Alchemy model describing the withdrawals table: one request to withdraw Earnings. Asking
+    moves the amount from Earnings to Pending Withdrawal ('withdrawal_request'); uSync staff then
+    complete it, having sent the money by hand ('withdrawal_complete': Pending Withdrawal ->
+    external), or return it with a reason ('withdrawal_return': back to Earnings). status
+    'pending' -> 'completed' or 'returned'. One pending per wallet; the browser's idempotency key
+    is unique, so a double click asks once.
+    """
+
+    __tablename__ = "withdrawals"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key = True, server_default = text("gen_random_uuid()"))
+    wallet_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("wallets.id", ondelete = "RESTRICT"))
+    amount_cents: Mapped[int] = mapped_column(BigInteger)
+    status: Mapped[str] = mapped_column(Text, server_default = text("'pending'"))
+    requested_by_account_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete = "SET NULL"), nullable = True)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = text("now()"))
+    decided_by_account_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete = "SET NULL"), nullable = True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone = True), nullable = True)
+    # Shown to the user when it's returned.
+    return_reason: Mapped[str | None] = mapped_column(Text, nullable = True)
+    # Staff only: the payout service's id for a completed withdrawal.
+    external_reference: Mapped[str | None] = mapped_column(Text, nullable = True)
+    idempotency_key: Mapped[str] = mapped_column(Text)
+
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name = "uq_withdrawals_idempotency_key"),
+        CheckConstraint("amount_cents > 0", name = "ck_withdrawals_amount"),
+        CheckConstraint("status IN ('pending', 'completed', 'returned')", name = "ck_withdrawals_status"),
+        CheckConstraint("(status = 'pending') = (decided_at IS NULL)", name = "ck_withdrawals_decided_at"),
+        CheckConstraint("(status = 'returned') = (return_reason IS NOT NULL)", name = "ck_withdrawals_return_reason"),
+        CheckConstraint("status = 'completed' OR external_reference IS NULL", name = "ck_withdrawals_external_reference"),
+        Index("uq_withdrawals_one_pending", "wallet_id", unique = True, postgresql_where = text("status = 'pending'")),
+        Index("ix_withdrawals_status_requested", "status", "requested_at"),
+    )
+
 class LedgerTransactions(Base):
     """
     SQL Alchemy model describing the ledger_transactions table: one movement of money and what it
@@ -155,12 +196,15 @@ class LedgerTransactions(Base):
     # names its event; guarantee funding, guarantee refunds and the payout are unique per (event, kind).
     entry_payment_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("entry_payments.id", ondelete = "RESTRICT"), nullable = True)
     event_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("bracket_events.id", ondelete = "RESTRICT"), nullable = True)
+    # Withdrawal requests, completions and returns: unique per (withdrawal, kind).
+    withdrawal_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("withdrawals.id", ondelete = "RESTRICT"), nullable = True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = text("now()"))
 
     __table_args__ = (
         CheckConstraint(
             "kind IN ('deposit', 'deposit_refund', 'chargeback', 'chargeback_reversal', 'manual_credit', 'manual_debit', 'deposit_refund_reversal',"
-            " 'entry_fee', 'entry_refund', 'guarantee_fund', 'guarantee_refund', 'event_payout')",
+            " 'entry_fee', 'entry_refund', 'guarantee_fund', 'guarantee_refund', 'event_payout',"
+            " 'withdrawal_request', 'withdrawal_complete', 'withdrawal_return')",
             name = "ck_ledger_transactions_kind",
         ),
         CheckConstraint(
@@ -178,6 +222,11 @@ class LedgerTransactions(Base):
         Index("uq_ledger_transactions_event_once", "event_id", "kind", unique = True,
               postgresql_where = text("kind IN ('guarantee_fund', 'guarantee_refund', 'event_payout')")),
         Index("ix_ledger_transactions_event", "event_id", postgresql_where = text("event_id IS NOT NULL")),
+        CheckConstraint(
+            "(kind IN ('withdrawal_request', 'withdrawal_complete', 'withdrawal_return')) = (withdrawal_id IS NOT NULL)",
+            name = "ck_ledger_transactions_withdrawal",
+        ),
+        Index("uq_ledger_transactions_withdrawal_kind", "withdrawal_id", "kind", unique = True, postgresql_where = text("withdrawal_id IS NOT NULL")),
     )
 
 class LedgerLines(Base):

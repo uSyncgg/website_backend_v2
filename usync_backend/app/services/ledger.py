@@ -15,10 +15,13 @@ from app.models.wallet import Wallets, LedgerAccounts, LedgerTransactions, Ledge
 # idempotency_key, unique too. Callers check first and treat a unique violation as "already done".
 #
 # Wallet buckets: 'wallet_deposited' (can be spent, never withdrawn) and 'wallet_earnings'
-# (prizes and host cuts; the only money that can be withdrawn).
+# (prizes and host cuts; the only money that can be withdrawn). A third account,
+# 'wallet_pending_withdrawal', holds Earnings the user asked to withdraw: it's never spendable.
 
 DEPOSITED = "wallet_deposited"
 EARNINGS = "wallet_earnings"
+PENDING_WITHDRAWAL = "wallet_pending_withdrawal"
+SPENDABLE = (DEPOSITED, EARNINGS)
 
 async def wallet_of(account_id, db: AsyncSession, lock: bool = False) -> Wallets:
     """
@@ -36,7 +39,8 @@ async def wallet_of(account_id, db: AsyncSession, lock: bool = False) -> Wallets
 
 async def wallet_accounts(wallet_id, db: AsyncSession) -> dict[str, LedgerAccounts]:
     """
-    { 'wallet_deposited': account, 'wallet_earnings': account } for a wallet, freshly read.
+    { 'wallet_deposited': ..., 'wallet_earnings': ..., 'wallet_pending_withdrawal': ... } for a
+    wallet, freshly read.
     """
 
     rows = (await db.execute(
@@ -49,7 +53,8 @@ async def system_account(type_: str, db: AsyncSession) -> LedgerAccounts:
 
 async def post(db: AsyncSession, kind: str, lines: list[tuple[uuid.UUID, int]], *, deposit_id = None,
                created_by = None, reason: str | None = None, reference: str | None = None,
-               idempotency_key: str | None = None, entry_payment_id = None, event_id = None) -> LedgerTransactions:
+               idempotency_key: str | None = None, entry_payment_id = None, event_id = None,
+               withdrawal_id = None) -> LedgerTransactions:
     """
     Writes one ledger transaction: lines are (ledger account id, signed cents), positive = in.
     Zero amounts are dropped. The caller commits; Postgres checks the sum then.
@@ -61,7 +66,7 @@ async def post(db: AsyncSession, kind: str, lines: list[tuple[uuid.UUID, int]], 
         raise ValueError(f"Ledger transaction {kind} doesn't balance: {lines}")
     txn = LedgerTransactions(id = uuid.uuid4(), kind = kind, deposit_id = deposit_id, created_by_account_id = created_by,
                              reason = reason, reference = reference, idempotency_key = idempotency_key,
-                             entry_payment_id = entry_payment_id, event_id = event_id)
+                             entry_payment_id = entry_payment_id, event_id = event_id, withdrawal_id = withdrawal_id)
     db.add(txn)
     await db.flush()
     db.add_all([LedgerLines(transaction_id = txn.id, ledger_account_id = account_id, amount_cents = cents) for account_id, cents in lines])
