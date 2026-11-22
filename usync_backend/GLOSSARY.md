@@ -1,6 +1,6 @@
 # uSync
 
-uSync is an esports platform where hosts run events and teams of players sign up and compete. This glossary covers the money side: wallets, entry fees and prizes.
+uSync is an esports platform where hosts run events and teams of players sign up and compete. This glossary covers the money side (wallets, entry fees and prizes), match results and chat.
 
 ## Language
 
@@ -112,6 +112,32 @@ _Avoid_: Results, leaderboard, rankings
 One entrant's finishing position in an event's standings. Entrants can share a placement.
 _Avoid_: Rank, place, position
 
+**Dispute Window**:
+The time after a match's result during which a side can still dispute it. It ends 5 minutes after the result, when the next match gets a report, or when a host or admin rules on the match, whichever comes first.
+_Avoid_: Dispute period, appeal window
+
 **Stalled Match**:
 A match whose sides are both known but that has had no report from either side for too long, so it goes to the admin queue.
 _Avoid_: Stuck match, abandoned match
+
+### Chat
+
+**Chat**:
+A conversation between a set of members on uSync. Every chat is of one kind, such as a match chat.
+_Avoid_: Room, channel, thread
+
+**Match Chat**:
+The chat for one match between the picked players of both sides, which the event's host and admins can join. It opens once both sides are known and closes for good after the chat grace period.
+_Avoid_: Match room, lobby chat
+
+**Chat Member**:
+A profile that can read and write in a chat: a picked player from the start, or an event admin once they join.
+_Avoid_: Participant, user
+
+**Chat Message**:
+One message in a chat, written by a member or posted by uSync itself. It can never be edited or deleted.
+_Avoid_: Post, comment
+
+**Chat Grace Period**:
+The 15 minutes a match chat stays open after its dispute window ends and any dispute or admin request is settled.
+_Avoid_: Cooldown
