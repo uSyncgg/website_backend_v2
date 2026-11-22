@@ -392,7 +392,7 @@ class EventIssues(Base):
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone = True), nullable = True)
 
     __table_args__ = (
-        CheckConstraint("type IN ('dispute', 'one_sided_report', 'no_show', 'post_advancement_dispute', 'stalled_match')", name = "ck_event_issues_type"),
+        CheckConstraint("type IN ('dispute', 'one_sided_report', 'no_show', 'post_advancement_dispute', 'stalled_match', 'admin_requested')", name = "ck_event_issues_type"),
         CheckConstraint("status IN ('open', 'claimed', 'dismissed', 'resolved')", name = "ck_event_issues_status"),
         Index("ix_event_issues_queue", "event_id", "status", "created_at"),
         Index("uq_event_issues_one_dispute_per_side", "match_id", "raised_by_entry_id", unique = True,
