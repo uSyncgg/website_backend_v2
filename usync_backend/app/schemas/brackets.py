@@ -295,6 +295,7 @@ class HostedEventCard(Out):
     name: str
     eventType: str
     hostProfile: str | None
+    hostName: str | None
     game: str
     gameTitle: str
     gameMode: str

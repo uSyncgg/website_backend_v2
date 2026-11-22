@@ -500,7 +500,9 @@ async def discover_events(game_key: str, event_type: str, db: AsyncSession, curs
     mode_ids = {e.game_mode_id for e in events} - {None}
     modes = dict((await db.execute(select(GameModes.id, GameModes.name).where(GameModes.id.in_(mode_ids)))).all()) if mode_ids else {}
     host_ids = {e.host_profile_id for e in events} - {None}
-    hosts = dict((await db.execute(select(Profiles.id, Profiles.public_id).where(Profiles.id.in_(host_ids)))).all()) if host_ids else {}
+    hosts = {pid: (public_id, username) for pid, public_id, username in (await db.execute(
+        select(Profiles.id, Profiles.public_id, Profiles.username).where(Profiles.id.in_(host_ids))
+    )).all()} if host_ids else {}
     signed_up = dict((await db.execute(
         select(BracketEntries.event_id, func.count()).where(BracketEntries.event_id.in_(ids), BracketEntries.status == "signed_up")
         .group_by(BracketEntries.event_id)
@@ -515,7 +517,8 @@ async def discover_events(game_key: str, event_type: str, db: AsyncSession, curs
             "id": event.public_id,
             "name": event.name,
             "eventType": event.event_type,
-            "hostProfile": hosts.get(event.host_profile_id),
+            "hostProfile": hosts.get(event.host_profile_id, (None, None))[0],
+            "hostName": hosts.get(event.host_profile_id, (None, None))[1],
             "game": game.name,
             "gameTitle": titles.get(event.game_title_id, ""),
             "gameMode": modes.get(event.game_mode_id, ""),
