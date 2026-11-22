@@ -186,6 +186,8 @@ async def _event_out(event: BracketEvents, user_id: str | None, db: AsyncSession
     can_manage = is_host or any(a.status == "accepted" and p.id in mine for a, p in admin_rows)
     solo = event.team_size == 1
     viewer = await access.viewer_entry(user_id, entries, db, roles, solo = solo)
+    # In matches every picked player can report and dispute, not just the owner and captains.
+    match_viewer = await access.viewer_entry(user_id, entries, db, roles, solo = solo, players_act = True)
     playing = {x.id for x in entries for _, p in players.get(x.id, []) if p is not None and p.id in mine}
     # Every entrant the viewer can act for: a captain can have several in a solo event.
     acts_for = [
@@ -229,7 +231,7 @@ async def _event_out(event: BracketEvents, user_id: str | None, db: AsyncSession
             "format": bracket.format,
             "seeds": seeds,
             "built": bsync.built_with_rows(bracket.format, seeds, rows),
-            "matches": await _match_views(event, rows, viewer, can_manage, db) if rows else {},
+            "matches": await _match_views(event, rows, match_viewer, can_manage, db) if rows else {},
         }
 
     game = await db.get(Games, event.game_id)
