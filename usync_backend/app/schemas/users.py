@@ -251,6 +251,9 @@ class RegistrationIn(StrictIn):
 
     default_profile: ProfileType
     profiles: list[ProfileIn] = Field(min_length=1, max_length=4)
+    # The sign-up form's required Terms of Service checkbox. Registration is refused without it.
+    tos_accepted: Literal[True]
+    tos_version: str = Field(min_length=1, max_length=32)
 
     @model_validator(mode = "after")
     def check_profiles(self):

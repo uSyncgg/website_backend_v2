@@ -3,6 +3,8 @@ import logging
 import unicodedata
 import re
 
+from datetime import datetime, timezone
+
 from typing import NoReturn
 from pydantic import ValidationError
 from sqlalchemy import select, insert, update, delete
@@ -59,7 +61,8 @@ SPACED_USERNAME_TYPES = {"org"}
 
 DETAIL_UPDATES = {"player": PlayerUpdate, "host": HostUpdate, "venue": VenueUpdate, "org": OrgUpdate}
 # Orgs run teams and enter events but never post them, so they never host brackets.
-NO_BRACKET_HOSTING = {"org"}
+# Only host and venue profiles (commission-based admins) can run brackets. See the Terms of Service.
+NO_BRACKET_HOSTING = {"org", "player"}
 GAME_ACCOUNT_LABELS = {"battlenet": "Battle.net", "activision": "Activision", "steam": "Steam", "riot": "Riot"}
 LINK_LABELS = {
     "twitch": "Twitch", "twitter": "Twitter", "youtube": "YouTube", "kick": "Kick", "discord": "Discord",
@@ -372,7 +375,7 @@ async def handle_registration(
     urls, paths = await _prepare_pictures(payload, files, supabase, user_id, openai)
 
     try:
-        user = UsersParent(id = user_id, email = email)
+        user = UsersParent(id = user_id, email = email, tos_version = payload.tos_version, tos_accepted_at = datetime.now(timezone.utc))
         db.add(user)
         await db.flush()
 
@@ -738,7 +741,7 @@ async def update_profile(user_id: str, profile_type: ProfileType, changes: Profi
             )
 
     if profile_type in NO_BRACKET_HOSTING and payload.get("bracket_hosting"):
-        raise _field_error(("body", "bracket_hosting"), "Organizations can't host brackets. Use a host profile to post events.")
+        raise _field_error(("body", "bracket_hosting"), "Players and organizations can't host brackets. Use a host profile to post events.")
 
     profile = await get_own_profile(user_id, profile_type, db)
     profile_id = profile.id
