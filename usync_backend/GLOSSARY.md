@@ -94,6 +94,10 @@ _Avoid_: Prize split, payout table
 Paying an event pool out to the host and the placing players when the event ends. A placing team's share is split equally among the players who played for it.
 _Avoid_: Withdrawal, distribution
 
+**Paid-Out Event**:
+An event with money whose payout has been made. Its results and money can no longer change, and it can't be cancelled.
+_Avoid_: Closed event, settled event
+
 **Cancelled Event**:
 An event with money that the host, or uSync for too few entrants, called off; every entry fee and guarantee goes back to whoever paid it. It's kept, never deleted.
 _Avoid_: Deleted event

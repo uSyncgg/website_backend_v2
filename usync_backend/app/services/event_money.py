@@ -16,7 +16,7 @@ from app.services.notifications import notify
 
 # Event money (GLOSSARY.md): entry fees into an event's pool, a guaranteed prize held for the
 # event, refunds and cancellations. Payouts (the pool and guarantee going to players and the host)
-# are PR 4.
+# are in app.services.payouts.
 #
 # Every function here runs inside the caller's transaction, after the caller has locked the
 # event row, and never commits. Wallets are locked in id order, so two sign-ups sharing a payer
@@ -383,6 +383,9 @@ async def cancel(event: BracketEvents, reason: str, db: AsyncSession) -> None:
 
     if event.cancelled_at is not None:
         return
+    if event.paid_out_at is not None:
+        # The money has gone to the winners and the host; there's nothing left to refund.
+        raise HTTPException(status_code=409, detail="This event has paid out its prizes, so it can't be cancelled.")
     for payment_id in await _paid_ids(db, EntryPayments.event_id == event.id):
         await refund_payment(payment_id, event, db)
     await refund_guarantee(event, db)
@@ -391,6 +394,7 @@ async def cancel(event: BracketEvents, reason: str, db: AsyncSession) -> None:
         # Only possible if money moved outside this module: stop rather than strand it.
         raise RuntimeError(f"Event {event.id} still holds money after cancelling: {left}")
     event.cancelled_at, event.cancel_reason, event.registration_open = _now(), reason, False
+    event.payout_due_at = None
     entries = await access.entry_accounts(await access.entries_of(event.id, db), db)
     people = set().union(*entries.values()) if entries else set()
     notify(db, people | set(await access.manager_accounts(event, db)), "event_cancelled", {
@@ -439,6 +443,8 @@ async def event_money_out(event: BracketEvents, db: AsyncSession) -> dict:
         "poolCents": balances.get(POOL, 0),
         "cancelledAt": event.cancelled_at.isoformat() if event.cancelled_at else None,
         "cancelReason": event.cancel_reason,
+        "payoutDueAt": event.payout_due_at.isoformat() if event.payout_due_at else None,
+        "paidOutAt": event.paid_out_at.isoformat() if event.paid_out_at else None,
     }
 
 async def entry_payments_out(entry_ids, db: AsyncSession) -> dict:
@@ -462,8 +468,14 @@ async def entry_payments_out(entry_ids, db: AsyncSession) -> dict:
 # ---- deleting profiles and accounts ---------------------------------------------------------
 
 def _unfinished():
+    """
+    Events still running: not cancelled, and not done. A free event is done when its bracket is
+    complete; an event with money only once it has paid out (its prizes are owed until then).
+    """
+
     complete = select(Brackets.id).where(Brackets.event_id == BracketEvents.id).where(Brackets.status == "complete")
-    return and_(BracketEvents.cancelled_at.is_(None), ~exists(complete))
+    free_done = and_(BracketEvents.prize_funding.is_(None), exists(complete))
+    return and_(BracketEvents.cancelled_at.is_(None), BracketEvents.paid_out_at.is_(None), ~free_done)
 
 async def check_hosts_can_go(profile_ids, db: AsyncSession) -> None:
     """

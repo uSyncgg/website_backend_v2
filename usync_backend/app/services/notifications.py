@@ -20,6 +20,8 @@ from app.models.brackets import Notifications
 #   issue_opened      { event_id, event_name, issue_type, label, match_id, summary }   host / admins: something's in the queue
 #   admin_joined      { event_id, event_name, player }                 your admin invite was accepted
 #   team_ownership    { team_id, team_name }                            you now own a team
+#   prize_paid        { event_id, event_name, amount_cents, placement }  your prize is in your Earnings
+#   host_payout       { event_id, event_name, amount_cents }             host: your share is in your Earnings
 #
 # Each user reads only their own rows. The browser gets them live over Supabase Realtime (the
 # notifications_select_own RLS policy), and through GET /notifications on load. Reading or

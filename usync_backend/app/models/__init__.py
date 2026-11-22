@@ -24,6 +24,7 @@ from app.models.brackets import (
     BracketEvents,
     BracketEntries,
     BracketEntryPlayers,
+    EventStandings,
     BracketEventAdmins,
     Brackets,
     BracketSeeds,

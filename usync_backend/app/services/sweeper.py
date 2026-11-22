@@ -8,6 +8,7 @@ from app.models.teams import TeamInvites
 from app.services import event_issues
 from app.services import event_money
 from app.services import matches
+from app.services import payouts
 from app.services.notifications import delete_old_read
 
 logger = logging.getLogger(__name__)
@@ -21,7 +22,10 @@ logger = logging.getLogger(__name__)
 #   deleted;
 # - events with money that reach their start time short of their minimum entrants are cancelled
 #   and everyone is refunded (each event row-locked with SKIP LOCKED, so a request working on it
-#   isn't waited on; the next tick picks it up).
+#   isn't waited on; the next tick picks it up);
+# - events with money whose standings have stood for 24 hours with nothing open in their admin
+#   queue are paid out (app.services.payouts; also SKIP LOCKED). A payout that can't be made is
+#   held, uSync is emailed after the commit, and it's tried again 24 hours later.
 #
 # Each run takes a transaction-level advisory lock first, so with several workers (or several
 # servers) only one does the work each minute; the others skip that tick.
@@ -38,6 +42,7 @@ async def sweep_once() -> None:
         raised = await matches.flag_one_sided_reports(db)
         stalled = await matches.flag_stalled_matches(db)
         cancelled = await event_money.auto_cancel_due(db)
+        paid, held = await payouts.pay_out_due(db)
         await event_issues.housekeep(db)
         removed = await delete_old_read(db)
         cutoff = datetime.now(timezone.utc) - timedelta(days = INVITE_RETENTION_DAYS)
@@ -45,9 +50,10 @@ async def sweep_once() -> None:
             delete(TeamInvites).where(TeamInvites.status != "pending").where(TeamInvites.responded_at < cutoff)
         )).rowcount or 0
         await db.commit()
-        if raised or stalled or removed or invites or cancelled:
+        await payouts.alert_held(held)
+        if raised or stalled or removed or invites or cancelled or paid:
             logger.info("Bracket sweep: %s one-sided reports and %s stalled matches queued, %s notifications and %s invites deleted, "
-                        "%s events cancelled below their minimum.", raised, stalled, removed, invites, cancelled)
+                        "%s events cancelled below their minimum, %s paid out.", raised, stalled, removed, invites, cancelled, paid)
 
 async def run_bracket_sweeper() -> None:
     while True:

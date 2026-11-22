@@ -237,8 +237,11 @@ class EventOut(Out):
     hostProfile: str | None
     host: ProfileRef | None
     # entryFeeCents, prizeFunding, guaranteeCents, guaranteeFunded, hostCutBps, payoutStructure,
-    # platformFeeBps, poolCents, cancelledAt, cancelReason.
+    # platformFeeBps, poolCents, cancelledAt, cancelReason, payoutDueAt, paidOutAt.
     money: dict[str, Any]
+    # Final placements once the bracket is complete, best first: [{entrantId, placement,
+    # prizeCents}]. Entrants can share a placement; prizeCents is set once the event pays out.
+    standings: list[dict[str, Any]] = []
     entrants: list[EntrantOut]
     canManage: bool
     isHost: bool
@@ -276,6 +279,7 @@ class EventSummary(Out):
     viewerMatch: dict[str, Any] | None
     winner: str | None
     viewerPlace: int | None
+    viewerPrizeCents: int | None = None
 
 class EventPage(Out):
     events: list[EventSummary]

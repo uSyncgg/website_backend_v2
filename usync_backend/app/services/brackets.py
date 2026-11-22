@@ -270,6 +270,10 @@ async def _event_out(event: BracketEvents, user_id: str | None, db: AsyncSession
         "hostProfile": host.public_id if host else None,
         "host": _profile_ref(host),
         "money": await money.event_money_out(event, db),
+        "standings": [
+            {"entrantId": str(entry_id), "placement": placement, "prizeCents": prize}
+            for entry_id, placement, prize in await bsync.standings_of_event(event, bracket, db)
+        ],
         "entrants": entrants,
         "canManage": can_manage,
         "isHost": is_host,
@@ -321,7 +325,7 @@ async def _page(condition, user_id: str | None, db: AsyncSession, cursor: str | 
 async def _summaries(events: list[BracketEvents], user_id: str | None, db: AsyncSession) -> list[dict]:
     """
     What the dashboard and profile cards show: counts, stage, and the viewer's entrant and match.
-    Brackets are only built for finished events, to name the winner and the viewer's place.
+    Finished events name the winner and the viewer's place (and prize) from the stored standings.
     """
 
     if not events:
@@ -351,7 +355,7 @@ async def _summaries(events: list[BracketEvents], user_id: str | None, db: Async
         can_manage = is_host or event.id in admin_of
         entries = await access.entries_of(event.id, db) if user_id else []
         viewer = await access.viewer_entry(user_id, entries, db, roles, solo = event.team_size == 1) if entries else None
-        viewer_match, winner, place = None, None, None
+        viewer_match, winner, place, prize = None, None, None, None
         if bracket and bracket.status != "draft":
             if viewer:
                 m = (await db.execute(
@@ -362,12 +366,13 @@ async def _summaries(events: list[BracketEvents], user_id: str | None, db: Async
                     other = m.entry_b_id if m.entry_a_id == viewer[0].id else m.entry_a_id
                     viewer_match = {"id": m.code, "opponent": next((e.name for e in entries if e.id == other), "TBD")}
             if bracket.status == "complete":
-                rows = await bsync.match_rows(bracket, db)
-                places = engine.placements(bracket.format, bsync.build(bracket.format, await bsync.seeds_of(bracket, db), rows)) or []
+                standings = await bsync.standings_of_event(event, bracket, db)
                 names = dict((await db.execute(select(BracketEntries.id, BracketEntries.name).where(BracketEntries.event_id == event.id))).all())
-                winner = names.get(uuid.UUID(places[0])) if places and places[0] else None
-                if viewer and str(viewer[0].id) in places:
-                    place = places.index(str(viewer[0].id)) + 1
+                winner = names.get(standings[0][0]) if standings else None
+                if viewer:
+                    mine_row = next((r for r in standings if r[0] == viewer[0].id), None)
+                    place = mine_row[1] if mine_row else None
+                    prize = mine_row[2] if mine_row else None
         out.append({
             "id": event.public_id,
             "name": event.name,
@@ -396,6 +401,7 @@ async def _summaries(events: list[BracketEvents], user_id: str | None, db: Async
             "viewerMatch": viewer_match,
             "winner": winner,
             "viewerPlace": place,
+            "viewerPrizeCents": prize,
         })
     return out
 

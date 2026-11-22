@@ -152,7 +152,7 @@ class LedgerTransactions(Base):
     # Set for actions a person can retry (manual credits/debits): the same key posts only once.
     idempotency_key: Mapped[str | None] = mapped_column(Text, nullable = True)
     # Entry fees and their refunds: unique per (payment, kind). Every event money movement also
-    # names its event; guarantee funding and refunds are unique per (event, kind).
+    # names its event; guarantee funding, guarantee refunds and the payout are unique per (event, kind).
     entry_payment_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("entry_payments.id", ondelete = "RESTRICT"), nullable = True)
     event_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("bracket_events.id", ondelete = "RESTRICT"), nullable = True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone = True), server_default = text("now()"))
@@ -160,7 +160,7 @@ class LedgerTransactions(Base):
     __table_args__ = (
         CheckConstraint(
             "kind IN ('deposit', 'deposit_refund', 'chargeback', 'chargeback_reversal', 'manual_credit', 'manual_debit', 'deposit_refund_reversal',"
-            " 'entry_fee', 'entry_refund', 'guarantee_fund', 'guarantee_refund')",
+            " 'entry_fee', 'entry_refund', 'guarantee_fund', 'guarantee_refund', 'event_payout')",
             name = "ck_ledger_transactions_kind",
         ),
         CheckConstraint(
@@ -171,12 +171,12 @@ class LedgerTransactions(Base):
         Index("uq_ledger_transactions_idempotency_key", "idempotency_key", unique = True, postgresql_where = text("idempotency_key IS NOT NULL")),
         CheckConstraint("(kind IN ('entry_fee', 'entry_refund')) = (entry_payment_id IS NOT NULL)", name = "ck_ledger_transactions_entry_payment"),
         CheckConstraint(
-            "kind NOT IN ('entry_fee', 'entry_refund', 'guarantee_fund', 'guarantee_refund') OR event_id IS NOT NULL",
+            "kind NOT IN ('entry_fee', 'entry_refund', 'guarantee_fund', 'guarantee_refund', 'event_payout') OR event_id IS NOT NULL",
             name = "ck_ledger_transactions_event",
         ),
         Index("uq_ledger_transactions_entry_payment_kind", "entry_payment_id", "kind", unique = True, postgresql_where = text("entry_payment_id IS NOT NULL")),
-        Index("uq_ledger_transactions_event_guarantee", "event_id", "kind", unique = True,
-              postgresql_where = text("kind IN ('guarantee_fund', 'guarantee_refund')")),
+        Index("uq_ledger_transactions_event_once", "event_id", "kind", unique = True,
+              postgresql_where = text("kind IN ('guarantee_fund', 'guarantee_refund', 'event_payout')")),
         Index("ix_ledger_transactions_event", "event_id", postgresql_where = text("event_id IS NOT NULL")),
     )
 
