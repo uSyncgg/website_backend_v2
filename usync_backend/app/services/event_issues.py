@@ -28,6 +28,7 @@ LABELS = {
     "no_show": "No-show reported",
     "post_advancement_dispute": "Dispute after advancing",
     "stalled_match": "No result reported",
+    "admin_requested": "Admin called to match chat",
 }
 # Types that are settled once their match has a result.
 SETTLED_BY_RESULT = ("dispute", "one_sided_report", "no_show", "stalled_match")
