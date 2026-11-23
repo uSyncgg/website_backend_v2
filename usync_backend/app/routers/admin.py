@@ -6,10 +6,10 @@ from stripe import StripeClient
 from app.core.dependencies import get_db, get_readonly_db, get_stripe_client, require_admin, require_money_admin
 from app.core.limiter import limiter, MODERATE
 from app.schemas.admin import AdminAccountsOut, AdminAnalyticsOut, AdminEventsOut
-from app.services.admin import get_admin_accounts, get_admin_analytics, get_admin_events
+from app.services.admin import get_admin_accounts, get_admin_analytics, get_admin_events, get_admin_wallets
 from app.services.brackets import admin_reset_bracket
 from app.schemas.wallet import (
-    AdminWalletOut, ManualMoveIn, DepositRefundIn, EventCancelIn, AdminWithdrawalOut, AdminWithdrawalsOut,
+    AdminWalletOut, AdminWalletSummaryOut, ManualMoveIn, DepositRefundIn, EventCancelIn, AdminWithdrawalOut, AdminWithdrawalsOut,
     WithdrawalCompleteIn, WithdrawalReturnIn,
 )
 from app.services import wallet as wallet_svc
@@ -74,6 +74,16 @@ async def adminCancelEvent(request: Request, response: Response, event_id: str, 
     """
 
     return await wallet_svc.admin_cancel_event(claims, event_id, body.reason, db)
+
+@router.get("/wallets/summary", response_model=AdminWalletSummaryOut)
+@limiter.limit(MODERATE)
+async def adminWalletSummary(request: Request, response: Response, claims: dict = Depends(require_money_admin),
+                             db: AsyncSession = Depends(get_readonly_db)):
+    """
+    Every account's Deposited Funds, Earnings and Pending Withdrawal, with totals over every wallet.
+    """
+
+    return await get_admin_wallets(db)
 
 @router.get("/wallets", response_model=AdminWalletOut)
 @limiter.limit(MODERATE)

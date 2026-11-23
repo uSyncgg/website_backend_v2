@@ -178,3 +178,58 @@ async def get_admin_accounts(db: AsyncSession) -> dict:
     accounts = [dict(row) for row in (await db.execute(ACCOUNTS_SQL)).mappings()]
 
     return {"generated_at": datetime.now(timezone.utc), "accounts": accounts}
+
+# Every wallet with its three balances, for the Finance tab's Wallets table and the Accounts
+# tab's money columns (money admins only). One grouped read of ledger_accounts, whose
+# balance_cents the ledger triggers keep in step with the lines. Username is the default
+# profile's, else the oldest profile's. account_id is NULL once the account was deleted.
+WALLETS_SQL = text("""
+    WITH balances AS (
+        SELECT w.id, w.account_id, w.frozen_at,
+               coalesce(sum(la.balance_cents) FILTER (WHERE la.type = 'wallet_deposited'), 0)::bigint AS deposited_cents,
+               coalesce(sum(la.balance_cents) FILTER (WHERE la.type = 'wallet_earnings'), 0)::bigint AS earnings_cents,
+               coalesce(sum(la.balance_cents) FILTER (WHERE la.type = 'wallet_pending_withdrawal'), 0)::bigint AS pending_cents
+        FROM wallets w
+        LEFT JOIN ledger_accounts la ON la.wallet_id = w.id
+        GROUP BY w.id
+    )
+    SELECT b.account_id, b.frozen_at, b.deposited_cents, b.earnings_cents, b.pending_cents,
+           u.email, coalesce(dp.username, f.username) AS username
+    FROM balances b
+    LEFT JOIN users u ON u.id = b.account_id
+    LEFT JOIN profiles dp ON dp.id = u.default_profile_id
+    LEFT JOIN LATERAL (
+        SELECT username FROM profiles p WHERE p.account_id = b.account_id ORDER BY p.created_at LIMIT 1
+    ) f ON b.account_id IS NOT NULL
+    ORDER BY b.earnings_cents DESC, b.deposited_cents DESC
+""")
+
+MONEY_FIELDS = ("depositedCents", "earningsCents", "pendingWithdrawalCents")
+
+async def get_admin_wallets(db: AsyncSession) -> dict:
+    """
+    Every account's wallet, and totals over every wallet. Wallets of deleted accounts aren't
+    listed but are counted in the totals, and reported on their own when they hold anything:
+    deletion is refused while a wallet holds money, so a non-zero one needs looking into.
+
+    ::param db the read-only database session
+
+    ::return a dict matching AdminWalletSummaryOut
+    """
+
+    items, totals = [], dict.fromkeys(MONEY_FIELDS, 0)
+    deleted = {"walletCount": 0, **dict.fromkeys(MONEY_FIELDS, 0)}
+    for row in (await db.execute(WALLETS_SQL)).mappings():
+        money = {"depositedCents": row["deposited_cents"], "earningsCents": row["earnings_cents"],
+                 "pendingWithdrawalCents": row["pending_cents"]}
+        for key in MONEY_FIELDS:
+            totals[key] += money[key]
+        if row["account_id"] is not None:
+            items.append({"accountId": str(row["account_id"]), "username": row["username"], "email": row["email"],
+                          **money, "frozen": row["frozen_at"] is not None})
+        elif any(money.values()):
+            deleted["walletCount"] += 1
+            for key in MONEY_FIELDS:
+                deleted[key] += money[key]
+
+    return {"generatedAt": datetime.now(timezone.utc).isoformat(), "items": items, "totals": totals, "deletedAccounts": deleted}
