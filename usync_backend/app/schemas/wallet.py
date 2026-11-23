@@ -108,3 +108,28 @@ class AdminWithdrawalOut(Out):
 
 class AdminWithdrawalsOut(Out):
     items: list[AdminWithdrawalOut]
+
+class AdminWalletRow(Out):
+    accountId: str
+    username: str | None
+    email: str | None
+    depositedCents: int
+    earningsCents: int
+    pendingWithdrawalCents: int
+    frozen: bool
+
+class AdminWalletMoney(Out):
+    depositedCents: int
+    earningsCents: int
+    pendingWithdrawalCents: int
+
+class AdminDeletedWallets(AdminWalletMoney):
+    # Wallets of deleted accounts that still hold money (should always be 0).
+    walletCount: int
+
+class AdminWalletSummaryOut(Out):
+    generatedAt: str
+    items: list[AdminWalletRow]
+    # Over every wallet, including deletedAccounts.
+    totals: AdminWalletMoney
+    deletedAccounts: AdminDeletedWallets
